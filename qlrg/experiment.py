@@ -7,6 +7,8 @@ from pathlib import Path
 
 from filelock import FileLock
 
+from .case_review import S0_LABELS, write_case_review
+
 from .common import (
     code_hash, object_hash, read_json, read_jsonl, sha256, write_json, write_jsonl,
 )
@@ -230,6 +232,11 @@ def execute(stage, mode, manifest_path, paths, model_config, config, output, rev
         write_jsonl(output / predictions, rows)
         if stage == "s0":
             oracle_report(output, manifest, mode, config, details, comparisons, grounding_policy)
+            write_case_review(
+                output / "review.html", rows, S0_LABELS, title=f"S0 · {output.parent.name}",
+                manifest=manifest, overlays_dir=output / "overlays", grounding_policy=grounding_policy,
+                repeats=config.get("bootstrap_resamples", 10000), seed=config.get("bootstrap_seed", 42),
+            )
         write_json(output / "runtime.json", {
             "job_id": os.environ["SLURM_JOB_ID"], "device": torch.cuda.get_device_name(),
             "peak_allocated_bytes_this_job": torch.cuda.max_memory_allocated(),

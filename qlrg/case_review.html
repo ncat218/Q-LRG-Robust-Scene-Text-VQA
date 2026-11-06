@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Q-LRG · Xem kết quả</title>
+<style>
+*{box-sizing:border-box} body{margin:0;font:15px/1.5 system-ui,sans-serif;background:#f7f8fb;color:#18243a}
+main{max-width:1160px;margin:auto;padding:24px 18px 44px} h1,h2,p{margin:0} h1{font-size:28px;line-height:1.2}
+header{margin-bottom:20px} header p,small,.muted{color:#475569} .card{background:white;border:1px solid #dbe2ea;border-radius:12px;padding:16px;margin:14px 0}
+h2{font-size:18px;margin-bottom:8px} .controls,.pager{display:flex;gap:12px;flex-wrap:wrap;align-items:end}
+label{display:grid;gap:4px} select,input,button{font:inherit;color:inherit;padding:7px;border:1px solid #a9b7c8;border-radius:6px;background:white}
+button:not(:disabled){cursor:pointer} button:disabled{opacity:.45} a{color:#17538b} #stats{margin-top:12px;font-variant-numeric:tabular-nums}
+#stats strong{font-size:20px} .scroll{overflow-x:auto} table{width:100%;border-collapse:collapse;margin:8px 0}
+th,td{text-align:left;border-bottom:1px solid #e2e8f0;padding:6px 8px;vertical-align:top} td.answer{overflow-wrap:anywhere;min-width:150px}
+td.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap} .up{color:#176344}.down{color:#a12430}
+tr.selected{background:#eaf3fd}.pager{align-items:center} .panels{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px;margin-top:8px}
+figure{margin:0} figure img{display:block;width:100%;height:auto;margin-top:8px;border-radius:5px}
+figcaption{overflow-wrap:anywhere} .note{margin:8px 0}.phase-note{margin-top:8px} @media(max-width:700px){.panels{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<main>
+<header><h1 id="run-title"></h1><p id="run-summary"></p></header>
+<section class="card" aria-label="Cách đọc báo cáo">
+<p>Chọn hai nhánh để so sánh trên các câu có kết quả ở cả hai nhánh. Ảnh mask minh họa vị trí thay feature. Báo cáo hiển thị các ảnh mask thực sự đã lưu trong run.</p>
+<p class="muted note" id="grounding-note" hidden></p>
+</section>
+<section class="card">
+<h2>So sánh hai nhánh</h2>
+<div class="controls">
+<label>Mốc đối chứng<select id="reference"></select></label>
+<label>Nhánh so sánh<select id="target"></select></label>
+<label>Lọc kết quả<select id="filter"><option value="all">Tất cả</option><option value="up">Tăng điểm</option><option value="down">Giảm điểm</option><option value="same-answer-change">Đổi đáp án, điểm giữ nguyên</option><option value="target-full">Nhánh so sánh đạt điểm 1</option><option value="target-zero">Nhánh so sánh đạt điểm 0</option><option value="target-partial">Nhánh so sánh được điểm một phần</option><option value="zero">Cả hai điểm 0</option><option value="overlay">Có ảnh mask</option></select></label>
+<label>Tìm theo mã câu<input id="search" inputmode="numeric" placeholder="Ví dụ 25266"></label>
+</div>
+<div id="stats" aria-live="polite"></div>
+<p class="muted phase-note">Điểm từng câu theo TextVQA từ 0 đến 1. Khoảng tin cậy 95% tính bằng bootstrap theo ảnh. Bộ lọc áp dụng cho bảng câu hỏi.</p>
+</section>
+<section class="card">
+<h2 id="case-title">Ảnh và đáp án của câu đã chọn</h2>
+<p id="question-text"></p><p id="reference-answers" class="muted note"></p>
+<div class="panels" id="panels"></div>
+</section>
+<section class="card">
+<h2>Kết quả từng câu</h2>
+<p class="muted">Chọn mã câu để xem ảnh mask nếu có.</p>
+<div class="scroll"><table><thead><tr><th>Mã câu</th><th>Đáp án mốc</th><th>Điểm</th><th>Đáp án so sánh</th><th>Điểm</th><th>Chênh lệch</th><th>Token thay</th><th>Ảnh mask</th></tr></thead><tbody id="rows"></tbody></table></div>
+<div class="pager"><button id="prev" type="button">Trang trước</button><span id="page"></span><button id="next" type="button">Trang sau</button></div>
+</section>
+</main>
+<script id="data" type="application/json">@@DATA@@</script>
+<script>
+'use strict';
+const D=JSON.parse(document.getElementById('data').textContent);
+const names=D.labels;
+const el=id=>document.getElementById(id);
+const pretty=(n,d=2)=>n.toLocaleString('vi-VN',{minimumFractionDigits:d,maximumFractionDigits:d});
+const signed=(n,d=2)=>(n>1e-9?'+':'')+pretty(Math.abs(n)<1e-9?0:n,d);
+const pageSize=25;
+let page=0,selectedId;
+el('run-title').textContent=D.title;
+el('run-summary').textContent=D.images+' ảnh · '+D.rows.length+' câu hỏi · '+D.predictionCount+' dự đoán · '+Object.keys(D.overlays).length+' ảnh mask';
+if(D.groundingPolicy){
+  el('grounding-note').hidden=false;
+  const notes={provisional_ocr_150:'Vùng đáp án lấy từ khớp OCR theo nhãn, chưa duyệt tay.',smoke_ocr:'Vùng đáp án lấy từ khớp OCR trong lượt smoke.',human_reviewed:'Vùng đáp án lấy từ nhãn đã duyệt.'};
+  el('grounding-note').textContent=notes[D.groundingPolicy]||D.groundingPolicy;
+}
+for(const id of ['reference','target']) for(const [k,v] of Object.entries(names)) el(id).add(new Option(k+' ('+v+')',k));
+el('reference').value=D.defaults[0]; el('target').value=D.defaults[1];
+function hasImage(r,a,b){return !!(D.overlays[r.id+'-'+a]||D.overlays[r.id+'-'+b]);}
+function showCase(r,a,b){
+  el('panels').replaceChildren();
+  el('question-text').textContent=r?.question||'';
+  el('reference-answers').textContent=r?.answers?.length?'Đáp án chuẩn: '+[...new Set(r.answers)].join(' · '):'';
+  if(!r){el('case-title').textContent='Ảnh và đáp án của câu đã chọn';return;}
+  el('case-title').textContent='Câu '+r.id;
+  for(const arm of [a,b]){
+    const [answer,score,count,total]=r.arms[arm];
+    const f=document.createElement('figure');
+    const caption=document.createElement('figcaption');
+    const title=document.createElement('strong');
+    title.textContent=arm+' ('+names[arm]+')'; caption.append(title,document.createElement('br'));
+    caption.append('“'+answer+'” · Điểm '+pretty(score,1)+(count===null?'':' · Thay '+count+'/'+total+' token'));
+    f.append(caption);
+    const imgData=D.overlays[r.id+'-'+arm];
+    if(imgData){
+      const img=document.createElement('img');img.alt='Ảnh Bicubic với ô xanh đánh dấu token thay ở '+arm;
+      img.src='data:image/png;base64,'+imgData;f.append(img);
+    }else{
+      const hint=document.createElement('p');hint.className='muted note';
+      hint.textContent='Gói kết quả không có ảnh mask của nhánh này cho câu đã chọn.';f.append(hint);
+    }
+    el('panels').append(f);
+  }
+}
+function render(){
+  const a=el('reference').value,b=el('target').value, f=el('filter').value, query=el('search').value.trim();
+  const [lo,hi]=[a,b].sort(), base=D.pairs[lo+':'+hi];
+  if(base){
+    const same=a===lo, g=same?base.d:-base.d, cl=same?base.lo:-base.hi, ch=same?base.hi:-base.lo;
+    el('stats').textContent=pretty(same?base.a:base.b)+'% → '+pretty(same?base.b:base.a)+'% · '+signed(g)+' điểm % · CI 95% ['+signed(cl)+'; '+signed(ch)+'] · '+base.n+' câu / '+base.images+' ảnh · '+(same?base.up:base.down)+' tăng / '+(same?base.down:base.up)+' giảm';
+  }else el('stats').textContent='Chọn hai nhánh khác nhau để xem chênh lệch.';
+  const matched=D.rows.filter(r=>r.arms[a]&&r.arms[b]);
+  const filtered=matched.filter(r=>{
+    if(query&&!r.id.includes(query))return false;
+    const x=r.arms[a],y=r.arms[b], delta=y[1]-x[1];
+    if(f==='up')return delta>1e-9;
+    if(f==='down')return delta< -1e-9;
+    if(f==='zero')return x[1]===0&&y[1]===0;
+    if(f==='target-full')return y[1]===1;
+    if(f==='target-zero')return y[1]===0;
+    if(f==='target-partial')return y[1]>0&&y[1]<1;
+    if(f==='same-answer-change')return Math.abs(delta)<1e-9&&x[0]!==y[0];
+    return f!=='overlay'||hasImage(r,a,b);
+  });
+  const pages=Math.max(1,Math.ceil(filtered.length/pageSize));page=Math.min(page,pages-1);
+  const active=filtered.find(r=>r.id===selectedId)||filtered.find(r=>hasImage(r,a,b))||filtered[0];
+  selectedId=active?.id;
+  showCase(active,a,b);
+  const body=el('rows');body.replaceChildren();
+  for(const r of filtered.slice(page*pageSize,(page+1)*pageSize)){
+    const tr=document.createElement('tr'), x=r.arms[a], y=r.arms[b],delta=y[1]-x[1];
+    if(r.id===selectedId)tr.className='selected';
+    const td=document.createElement('td'), btn=document.createElement('button');
+    btn.type='button';btn.textContent=r.id;btn.addEventListener('click',()=>{selectedId=r.id;render();el('case-title').scrollIntoView({block:'nearest'});});td.append(btn);tr.append(td);
+    for(const [value,cls] of [[x[0],'answer'],[pretty(x[1],1),'num'],[y[0],'answer'],[pretty(y[1],1),'num'],[signed(delta,1),'num '+(delta>1e-9?'up':delta< -1e-9?'down':'')],[y[2]===null?'—':y[2]+'/'+y[3],'num'],[hasImage(r,a,b)?'Có':'—','']]){
+      const cell=document.createElement('td');cell.className=cls;cell.textContent=value;tr.append(cell);
+    }
+    body.append(tr);
+  }
+  if(!filtered.length){const tr=document.createElement('tr'), td=document.createElement('td');td.colSpan=8;td.textContent='Không có câu nào khớp bộ lọc.';tr.append(td);body.append(tr);}
+  el('page').textContent='Trang '+(page+1)+'/'+pages+' · '+filtered.length+'/'+matched.length+' câu';
+  el('prev').disabled=page===0;el('next').disabled=page>=pages-1;
+}
+for(const id of ['reference','target','filter','search']) el(id).addEventListener(id==='search'?'input':'change',()=>{page=0;render();});
+el('prev').addEventListener('click',()=>{page--;render();});el('next').addEventListener('click',()=>{page++;render();});
+render();
+</script>
+</body>
+</html>

@@ -13,3 +13,6 @@ qlrg = "qlrg.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["qlrg*"]
+
+[tool.setuptools.package-data]
+qlrg = ["case_review.html"]

@@ -11,7 +11,9 @@ python3 run_all.py --mode full
 
 The launcher saves `full.sbatch` and submits one job with one H200 35 GB MIG slice, four CPUs, 32 GB RAM and a three-hour walltime limit. After allocation, the job checks or creates the pinned environment, builds the 500-image manifest, runs D0, and verifies its artifacts before running S0. If D0 fails, the job stops at D0.
 
-The command prints the run directory and the Slurm Job ID. Full runs go under `runs/full500-*/`, with logs in `logs/` and the S0 memo at `s0/decision.md`. Add `--dry-run` to generate the script without setup or submission. `python3 run_all.py --mode smoke` runs the 12-image check.
+The command prints the run directory and the Slurm Job ID. Full runs go under `runs/full500-*/`, with logs in `logs/`, the S0 memo at `s0/decision.md`, and the interactive case report at `s0/review.html`. Add `--dry-run` to generate the script without setup or submission. `python3 run_all.py --mode smoke` runs the 12-image check.
+
+Download `s0/review.html` and open it in a browser. It contains the per-question predictions and the masks saved by the run. The comparison only uses questions scored in both selected arms. For a completed run created before this feature, generate the report on CPU using `"${QLRG_ENV:-$PWD/.venv}/bin/python" -m qlrg.cli build-review --run-dir <run-directory>`. Pass `--manifest` if it lives outside the run directory.
 
 Setup uses `QLRG_UV` when set, then checks PATH and the shared UIT-HPC uv executable. The first setup downloads the pinned dependencies inside the job and records progress in the Slurm logs. If compute-node downloads fail, prepare the environment once from the login node with `bash scripts/setup_hpc.sh` and submit again. For an existing verified Q-LRG environment, export `QLRG_ENV` with its absolute path. Slurm inherits it from the launching shell.
 

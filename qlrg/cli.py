@@ -3,7 +3,10 @@
 import argparse
 from pathlib import Path
 
-from .common import dataset_paths, read_config, read_json, sha256, write_json
+from filelock import FileLock
+
+from .case_review import S0_LABELS, write_case_review
+from .common import dataset_paths, read_config, read_json, read_jsonl, sha256, write_json
 from .data import annotation_file, build_manifest, load_clean, verify_pillow
 from .experiment import execute, validate_manifest, verified_complete
 from .grounding import write_review_pack
@@ -41,12 +44,37 @@ def main():
     verify = commands.add_parser("verify-run")
     verify.add_argument("--stage", choices=("d0", "s0"), required=True)
     verify.add_argument("--run-dir", type=Path, required=True)
+    build_review = commands.add_parser("build-review", help="Export the case browser for an existing S0 run")
+    build_review.add_argument("--run-dir", type=Path, required=True)
+    build_review.add_argument("--manifest", type=Path, help="Manifest if stored outside the run directory")
     args = parser.parse_args()
 
     if args.command == "verify-run":
         stage_dir = args.run_dir / args.stage
         verified_complete(stage_dir, args.stage)
         print(f"Verified {stage_dir}")
+        return
+    if args.command == "build-review":
+        stage_dir = args.run_dir / "s0"
+        with FileLock(str(stage_dir / ".run.lock"), timeout=0):
+            binding = verified_complete(stage_dir, "s0")
+            report = stage_dir / "review.html"
+            if not report.exists():
+                manifest_path = args.manifest or args.run_dir / "manifest.json"
+                manifest = None
+                if args.manifest or manifest_path.is_file():
+                    if sha256(manifest_path) != binding["shared"]["manifest_sha256"]:
+                        raise ValueError("Review manifest does not match the evaluated manifest")
+                    manifest = read_json(manifest_path)
+                config = binding["config"]
+                write_case_review(
+                    report, read_jsonl(stage_dir / "oracle_predictions.jsonl"), S0_LABELS,
+                    title=f"S0 · {args.run_dir.name}", manifest=manifest,
+                    overlays_dir=stage_dir / "overlays",
+                    grounding_policy=binding.get("grounding_policy"),
+                    repeats=config.get("bootstrap_resamples", 10000), seed=config.get("bootstrap_seed", 42),
+                )
+        print(report.resolve())
         return
     paths = dataset_paths(read_config(args.paths))
     if args.command == "build-manifest":
