@@ -41,8 +41,13 @@ def main():
             grounding.add_argument("--provisional-grounding", action="store_true",
                                    help="Allow provisional OCR grounding for full S0")
             run.add_argument("--d0-run", type=Path, help="Matching D0 stage directory if kept under a different run")
+    s1 = commands.add_parser("s1")
+    s1.add_argument("--from-run", type=Path, required=True)
+    s1.add_argument("--run-dir", type=Path, required=True)
+    s1.add_argument("--config", type=Path, default=Path("configs/s1.yaml"))
+    s1.add_argument("--model-config", type=Path, default=Path("configs/model_qwen.yaml"))
     verify = commands.add_parser("verify-run")
-    verify.add_argument("--stage", choices=("d0", "s0"), required=True)
+    verify.add_argument("--stage", choices=("d0", "s0", "s1"), required=True)
     verify.add_argument("--run-dir", type=Path, required=True)
     build_review = commands.add_parser("build-review", help="Export the case browser for an existing S0 run")
     build_review.add_argument("--run-dir", type=Path, required=True)
@@ -109,6 +114,11 @@ def main():
         validate_manifest(manifest)
         count = write_review_pack(manifest, paths["textvqa"], args.output, args.limit)
         print(f"Prepared {count} distinct image/question pairs for grounding review in {args.output}")
+    elif args.command == "s1":
+        from .s1_run import run_s1
+
+        run_s1(args.from_run, args.run_dir / "s1", paths,
+               read_config(args.model_config), read_config(args.config))
     else:
         execute(
             args.command, args.mode, args.manifest, paths,

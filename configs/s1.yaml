@@ -1,0 +1,17 @@
+seed: 42
+train_images: 2048
+epochs: 1
+accumulate: 4
+checkpoint_every: 25
+clean_fraction: 0.20
+learning_rate: 0.0002
+weight_decay: 0.01
+max_grad_norm: 1.0
+hidden: 224
+spatial_blocks: 2
+lora_rank: 4
+lora_alpha: 8
+feature_weight: 1.0
+residual_weight: 0.01
+max_answer_tokens: 32
+bootstrap_resamples: 10000

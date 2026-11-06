@@ -9,8 +9,8 @@ from pathlib import Path
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("stage", choices=("d0", "s0", "pipeline"))
-    parser.add_argument("--mode", choices=("smoke", "full"), required=True)
-    parser.add_argument("--manifest", type=Path, required=True)
+    parser.add_argument("--mode", choices=("smoke", "full", "s1"), required=True)
+    parser.add_argument("--manifest", type=Path)
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--review", type=Path)
     parser.add_argument("--d0-run", type=Path)
@@ -20,6 +20,10 @@ def main():
     parser.add_argument("--time")
     parser.add_argument("--submit", action="store_true")
     args = parser.parse_args()
+    if args.mode == "s1" and args.stage != "pipeline":
+        parser.error("S1 uses the generated pipeline")
+    if args.mode != "s1" and args.manifest is None:
+        parser.error("--manifest is required for D0/S0")
     if args.stage == "s0" and args.mode == "full" and args.review is None:
         parser.error("Full S0 requires --review")
     if args.stage != "s0" and (args.review or args.d0_run):
@@ -58,9 +62,10 @@ def main():
         f"--qos={config['qos']}", f"--gres={config['gres']}",
         f"--cpus-per-task={cpus}", f"--mem={memory}", f"--time={time}",
         f"--output={logs}/%x-%j.out", f"--error={logs}/%x-%j.err",
-        str(script), "--mode", args.mode,
-        "--manifest", str(args.manifest.resolve()), "--run-dir", str(run_dir),
+        str(script),
     ]
+    if args.mode != "s1":
+        command.extend(("--mode", args.mode, "--manifest", str(args.manifest.resolve()), "--run-dir", str(run_dir)))
     for flag, path in (("--review", args.review), ("--d0-run", args.d0_run), ("--config", args.config)):
         if path is not None:
             command.extend((flag, str(path.resolve())))

@@ -54,3 +54,32 @@ cat runs/diag500-v1/s0/decision.md
 ```
 
 Slurm stdout and stderr go under the run's `logs/` directory with the job ID. Use the same manifest, options and run directory to resume. A changed experiment gets a new directory. S0 writes scored predictions, the paired summaries, coverage, PNG overlays and a decision memo. Set `QLRG_FEATURE_CACHE` to a dedicated writable cache directory to reuse validated feature pairs across compatible runs.
+
+## S1 pilot from a verified D0/S0 run
+
+From the existing checkout on the UIT-HPC login node, update the code and submit one job.
+
+```bash
+cd /datastore/dungmt/textvqa/Tuan/Q-LRG-Robust-Scene-Text-VQA
+git pull --ff-only
+python3 run_all.py --mode s1 --from-run runs/full500-20261106T120210Z-6z0yzfi_
+```
+
+The launcher snapshots the S1 YAML, generates `s1.sbatch`, and submits one H200 35 GB MIG slice with 8 CPUs, 48 GB of host RAM and a 6-hour walltime limit. Actual training time and peak GPU memory need validation on UIT-HPC. The compute job checks the environment, verifies the source D0/S0 checksums and repeats the identity gate. It checks BF16 gradients through the restorer and LoRA before training all four adapters. The original D0/S0 run provides evaluation provenance. The job regenerates A0 predictions with the same feature injection path as the S1 comparisons.
+
+S1 uses one epoch on 2,048 deterministically selected `train_inner` images. The four trained arms use the same examples in the same order, with 20% of images CLEAN and the rest LR4. All evaluate on both conditions for the same questions on the 500 held-out images in the anchor. S1a learns to match clean features. S1b combines answer loss, feature matching and a residual penalty. A1 is an answer-supervised token-wise visual adapter. A2 is an answer-supervised rank-4 LoRA on the language layers' Q/V projections. A0 keeps the frozen Qwen features. Use `--s1-config PATH` to provide a complete alternative YAML before launching a new run.
+
+Use the printed run path and job ID. Set `run` and `job_id` to those values.
+
+```bash
+sacct -j "$job_id" --format=JobID,JobName,State,ExitCode,Elapsed
+"${QLRG_ENV:-$PWD/.venv}/bin/python" -B -m qlrg.cli verify-run --stage s1 --run-dir "$run"
+```
+
+Download `s1/review.html` for LR4 and `s1/review-clean.html` for CLEAN. Open them in a browser to filter per-question predictions and inspect residual heatmaps for the first eight evaluation images in the visual variants. Each heatmap scales colors within that image and arm. `s1/summary.csv` reports paired 95% intervals, including the numeric/date slice. `s1/summary.json` also records accuracy, parameter counts, training history and compute measurements. `s1/feature_regressions.json` lists cases where feature MSE improved but answer score fell. `s1/baseline_audit.json` compares the archived native and injected predictions per question.
+
+If the job stops, resubmit the same run directory with the original checkout and environment. The job restores each completed optimizer checkpoint and resumes evaluation from completed image shards.
+
+```bash
+python3 run_all.py --mode s1 --resume "$run"
+```

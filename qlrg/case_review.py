@@ -21,7 +21,7 @@ S0_LABELS = {
 
 
 def write_case_review(path, predictions, labels, *, title, manifest=None, overlays_dir=None,
-                      grounding_policy=None, repeats=10000, seed=42):
+                      grounding_policy=None, repeats=10000, seed=42, image_overlays=None):
     """Render scored rows grouped by question; optional masks are named QUESTION-ARM.png."""
     rows = {}
     for p in predictions:
@@ -77,15 +77,23 @@ def write_case_review(path, predictions, labels, *, title, manifest=None, overla
             if overlay.stem in known:
                 overlays[overlay.stem] = base64.b64encode(overlay.read_bytes()).decode("ascii")
 
+    if image_overlays is not None:
+        known = {f"{r['img']}-{arm}" for r in rows.values() for arm in r["arms"]}
+        for overlay in sorted(image_overlays):
+            if overlay.stem in known:
+                overlays[overlay.stem] = base64.b64encode(overlay.read_bytes()).decode("ascii")
+
     defaults = next((pair.split(":") for pair in pairs), list(active)[:2])
     if len(defaults) == 1:
         defaults *= 2
     if "O0:O2" in pairs:
         defaults = ["O0", "O2"]
+    if "A0:S1b" in pairs:
+        defaults = ["A0", "S1b"]
     data = {
         "title": title, "labels": active, "defaults": defaults, "rows": list(rows.values()),
         "images": len({r["img"] for r in rows.values()}), "predictionCount": len(predictions),
-        "groundingPolicy": grounding_policy, "pairs": pairs, "overlays": overlays,
+        "groundingPolicy": grounding_policy, "pairs": pairs, "overlays": overlays, "heatmaps": image_overlays is not None,
     }
     template = Path(__file__).with_name("case_review.html").read_text(encoding="utf-8")
     payload = json.dumps(data, ensure_ascii=False, allow_nan=False, separators=(",", ":"))

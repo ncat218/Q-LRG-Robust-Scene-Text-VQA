@@ -64,10 +64,15 @@ def verified_complete(output, stage, fingerprint=None):
         raise ValueError(f"Completion marker mismatch in {output}")
     if fingerprint is not None and complete["binding"] != fingerprint:
         raise ValueError(f"Experiment binding changed in {output}; choose a new run directory")
-    required = {"predictions.jsonl", "identity.json", "baseline_summary.json", "baseline_summary.csv"} if stage == "d0" else {
-        "oracle_predictions.jsonl", "oracle_summary.json", "oracle_summary.csv",
-        "oracle_coverage.json", "decision.md",
-    }
+    required = {
+        "d0": {"predictions.jsonl", "identity.json", "baseline_summary.json", "baseline_summary.csv"},
+        "s0": {"oracle_predictions.jsonl", "oracle_summary.json", "oracle_summary.csv",
+               "oracle_coverage.json", "decision.md"},
+        "s1": {"predictions.jsonl", "identity.json", "summary.json", "summary.csv", "train_manifest.json",
+               "review.html", "review-clean.html", "baseline_audit.json", "gradient_gate.json", "feature_regressions.json",
+               "training_history.csv",
+               *(f"variants/{arm}/checkpoint.pt" for arm in ("S1a", "S1b", "A1", "A2"))},
+    }[stage]
     if not required <= complete["artifacts"].keys():
         raise ValueError(f"Missing required artifacts in completion marker {output}")
     for name, digest in complete["artifacts"].items():

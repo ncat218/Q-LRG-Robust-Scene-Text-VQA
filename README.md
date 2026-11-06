@@ -4,6 +4,8 @@ Q-LRG tests whether substituting clean post-Merger visual features recovers Text
 
 After cloning on the UIT-HPC login node, run `python3 run_all.py --mode full` from the checkout. It generates a Slurm script and submits one 500-image D0/S0 evaluation. S0 starts after D0 passes. Add `--review PATH` to use approved answer-region grounding for O3–O5. Without a review, the full job labels those arms as provisional OCR diagnostics. Use `--mode smoke` for a 12-image check.
 
+S1 trains two global restorers and two adaptation controls in one allocation. Reuse an existing full D0/S0 run with `python3 run_all.py --mode s1 --from-run runs/<full-run>`. The job trains on 2,048 separate `train_inner` images and evaluates all five arms on the original CLEAN/LR4 evaluation set.
+
 The diagnostic set uses a fixed prefix of the TextOCR-covered images in a 90/10 image-level split of official train. The default 500 images form an initial precision and coverage check. Extend the prefix with the same seed when the paired intervals are too wide for the planned effect or the grounding cohort is too small.
 
 - [UIT-HPC runbook](docs/h200_runbook.md)
