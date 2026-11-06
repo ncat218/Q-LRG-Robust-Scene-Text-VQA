@@ -11,6 +11,11 @@ command -v "$uv" >/dev/null || { echo "Set QLRG_UV to the absolute path to uv" >
 export UV_CACHE_DIR="${QLRG_UV_CACHE:-$repo/.uv-cache}"
 export UV_PYTHON_INSTALL_DIR="${QLRG_UV_PYTHON:-$repo/.uv-python}"
 export UV_LINK_MODE=copy
+# Keep uv below shared-node thread limits, including its Rayon install pool.
+export UV_CONCURRENT_INSTALLS=1
+export UV_CONCURRENT_CACHE_READS=1
+export UV_CONCURRENT_BUILDS=1
+export UV_CONCURRENT_DOWNLOADS=2
 
 if [[ ! -x "$venv/bin/python" ]]; then
     "$uv" venv --python 3.10.22 --managed-python "$venv"
