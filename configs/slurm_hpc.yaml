@@ -1,8 +1,0 @@
-account: uit
-partition: normal
-qos: mig2-35
-gres: gpu:2g.35gb:1
-smoke:
-  cpus: 4
-  memory: 32G
-  time: "00:30:00"

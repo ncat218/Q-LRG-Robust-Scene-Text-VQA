@@ -1,9 +1,10 @@
-"""Prepare Q-LRG and submit one D0/S0 smoke job from the UIT-HPC login node."""
+"""Submit one D0/S0 smoke job from the UIT-HPC login node."""
 
 import argparse
 import os
 import shlex
 import subprocess
+import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -20,12 +21,28 @@ exec "$@"
 """
 
 
-def write_job(run_dir, python):
-    commands = []
+def write_job(run_dir, manifest, python, paths_config):
+    python_cmd = [str(python), "-B", "-m", "qlrg.cli"]
+    data_cmd = [*python_cmd, "--paths", paths_config]
+    commands = [
+        'export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-4}"',
+        "export PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1",
+        "(",
+        "    flock 9",
+        f"    if [[ ! -x {shlex.quote(str(python))} ]] || ! bash scripts/check_environment.sh; then",
+        "        bash scripts/setup_hpc.sh",
+        "    fi",
+        f") 9>{shlex.quote(str(run_dir.parent / '.environment.lock'))}",
+        f"if [[ -f {shlex.quote(str(manifest))} ]]; then",
+        "    " + shlex.join([*data_cmd, "validate-dataset", "--manifest", str(manifest)]),
+        "else",
+        "    " + shlex.join([*data_cmd, "build-manifest", "--images", "12", "--output", str(manifest)]),
+        "fi",
+    ]
     for stage in ("d0", "s0"):
         commands.extend([
             f'bash slurm/job.sh {stage} "$@"',
-            shlex.join([str(python), "-B", "-m", "qlrg.cli", "verify-run",
+            shlex.join([*python_cmd, "verify-run",
                         "--stage", stage, "--run-dir", str(run_dir)]),
         ])
     script = run_dir / "smoke.sbatch"
@@ -45,35 +62,23 @@ def main():
     env["QLRG_ENV"] = str(Path(env.get("QLRG_ENV", REPO / ".venv")).expanduser().absolute())
     python = Path(env["QLRG_ENV"]) / "bin/python"
     slurm = ["bash", "-c", WITH_SLURM, "qlrg-slurm"]
-    if not args.dry_run:
-        subprocess.run([*slurm, "sbatch", "--version"], cwd=REPO, env=env, check=True)
-        ready = python.is_file() and subprocess.run(
-            ["bash", "scripts/check_environment.sh"], cwd=REPO, env=env
-        ).returncode == 0
-        if not ready:
-            subprocess.run(["bash", "scripts/setup_hpc.sh"], cwd=REPO, env=env, check=True)
-
     runs = REPO / "runs"
     runs.mkdir(exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     run_dir = Path(tempfile.mkdtemp(prefix=f"smoke12-{stamp}-", dir=runs))
     manifest = run_dir / "manifest.json"
-    script = write_job(run_dir, python)
-    build = [
-        str(python), "-B", "-m", "qlrg.cli", "--paths",
+    script = write_job(
+        run_dir, manifest, python,
         env.get("QLRG_PATHS_CONFIG", "configs/paths_hpc.yaml"),
-        "build-manifest", "--images", "12", "--output", str(manifest),
-    ]
+    )
     submit = [
-        str(python), "-B", "scripts/submit.py", "pipeline", "--mode", "smoke",
+        sys.executable, "-B", "scripts/submit.py", "pipeline", "--mode", "smoke",
         "--manifest", str(manifest), "--run-dir", str(run_dir), "--submit",
     ]
     print(f"Slurm script: {script}\nLogs: {run_dir / 'logs'}", flush=True)
     if args.dry_run:
-        print(shlex.join(build))
         print(shlex.join(submit))
         return
-    subprocess.run(build, cwd=REPO, env=env, check=True)
     subprocess.run([*slurm, *submit], cwd=REPO, env=env, check=True)
 
 

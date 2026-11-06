@@ -9,11 +9,11 @@ cd Q-LRG-Robust-Scene-Text-VQA
 python3 run_all.py
 ```
 
-The launcher loads Slurm if needed, checks or creates the pinned environment, and builds a 12-image manifest. It saves the generated `smoke.sbatch` and submits one job with one H200 35 GB MIG slice, four CPUs, 32 GB RAM and a 30-minute limit. The job runs D0, verifies its artifacts, then runs and verifies S0. If D0 fails, the job stops at D0.
+The launcher loads Slurm if needed, saves the generated `smoke.sbatch`, and submits one job with one H200 35 GB MIG slice, four CPUs, 32 GB RAM and a 30-minute limit. After allocation, the job checks or creates the pinned environment, builds a 12-image manifest, runs D0, and verifies its artifacts before running S0. If D0 fails, the job stops at D0.
 
 The command prints the run directory and the Slurm Job ID. Each invocation creates a new run under `runs/smoke12-*/`, with logs in its `logs/` directory. Use `python3 run_all.py --dry-run` to generate the script without setup or submission.
 
-Setup uses `QLRG_UV` when set, then checks PATH and the shared UIT-HPC uv executable. The first setup downloads the pinned dependencies. For an existing verified Q-LRG environment, export `QLRG_ENV` with its absolute path. Slurm inherits it from the launching shell.
+Setup uses `QLRG_UV` when set, then checks PATH and the shared UIT-HPC uv executable. The first setup downloads the pinned dependencies inside the job and records progress in the Slurm logs. If compute-node downloads fail, prepare the environment once from the login node with `bash scripts/setup_hpc.sh` and submit again. For an existing verified Q-LRG environment, export `QLRG_ENV` with its absolute path. Slurm inherits it from the launching shell.
 
 Dataset and offline model cache paths are in `configs/paths_hpc.yaml`. Override them with `QLRG_TEXTVQA`, `QLRG_TEXTOCR` and `QLRG_HF_HUB`, or set `QLRG_PATHS_CONFIG` for the smoke pipeline. The model snapshot must exist in the Hugging Face hub cache at the pinned revision.
 

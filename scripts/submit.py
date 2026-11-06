@@ -1,12 +1,10 @@
 """Print a concrete Slurm command, or submit it after an explicit --submit."""
 
 import argparse
+import json
 import shlex
 import subprocess
 from pathlib import Path
-
-import yaml
-
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
@@ -28,12 +26,12 @@ def main():
         parser.error("--review and --d0-run only apply to S0")
     if args.stage == "pipeline" and (args.mode != "smoke" or args.config):
         parser.error("The generated pipeline supports smoke mode and default stage configs")
-    if not args.manifest.is_file():
+    if args.stage != "pipeline" and not args.manifest.is_file():
         parser.error("Manifest must exist before preparing a Slurm command")
 
     repo = Path(__file__).resolve().parents[1]
-    with (repo / "configs/slurm_hpc.yaml").open(encoding="utf-8") as handle:
-        config = yaml.safe_load(handle)
+    with (repo / "configs/slurm_hpc.json").open(encoding="utf-8") as handle:
+        config = json.load(handle)
     resources = config["smoke"] if args.mode == "smoke" else {}
     cpus = args.cpus or resources.get("cpus")
     memory = args.memory or resources.get("memory")
