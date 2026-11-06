@@ -1,0 +1,9 @@
+/.venv/
+/.uv-cache/
+/.uv-python/
+/runs/
+/local/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/

@@ -1,0 +1,7 @@
+mask_rule: overlap
+cell_overlap_threshold: 0.05
+dilation_radius: 1
+random_seed: 42
+overlay_questions: 8
+bootstrap_resamples: 10000
+bootstrap_seed: 42
