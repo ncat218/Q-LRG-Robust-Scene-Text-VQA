@@ -24,15 +24,15 @@ def main():
         parser.error("Full S0 requires --review")
     if args.stage != "s0" and (args.review or args.d0_run):
         parser.error("--review and --d0-run only apply to S0")
-    if args.stage == "pipeline" and (args.mode != "smoke" or args.config):
-        parser.error("The generated pipeline supports smoke mode and default stage configs")
+    if args.stage == "pipeline" and args.config:
+        parser.error("The generated pipeline uses default stage configs")
     if args.stage != "pipeline" and not args.manifest.is_file():
         parser.error("Manifest must exist before preparing a Slurm command")
 
     repo = Path(__file__).resolve().parents[1]
     with (repo / "configs/slurm_hpc.json").open(encoding="utf-8") as handle:
         config = json.load(handle)
-    resources = config["smoke"] if args.mode == "smoke" else {}
+    resources = config[args.mode] if args.mode == "smoke" or args.stage == "pipeline" else {}
     cpus = args.cpus or resources.get("cpus")
     memory = args.memory or resources.get("memory")
     time = args.time or resources.get("time")
@@ -43,10 +43,10 @@ def main():
     run_dir = args.run_dir.resolve()
     logs = run_dir / "logs"
     if args.stage == "pipeline":
-        script = run_dir / "smoke.sbatch"
+        script = run_dir / f"{args.mode}.sbatch"
         if not script.is_file():
             parser.error("Generate the pipeline with run_all.py first")
-        job_name = "qlrg-smoke"
+        job_name = f"qlrg-{args.mode}"
     else:
         template = f"d0_{args.mode}.sbatch" if args.stage == "d0" else "s0_oracle.sbatch"
         script = repo / "slurm" / template

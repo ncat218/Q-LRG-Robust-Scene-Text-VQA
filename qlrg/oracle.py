@@ -69,7 +69,7 @@ def grounding_status(question, mode, review):
     if qid in review:
         row = review[qid]
         return row["status"], row["word_ids"], row.get("context_dependent", False)
-    if mode == "smoke" and question["candidate"]:
+    if mode == "smoke" and not review and question["candidate"]:
         return "automatic_smoke_only", question["candidate"]["word_ids"], False
     return ("unreviewed_candidate" if question["candidate"] else "no_literal_candidate"), [], False
 
@@ -112,7 +112,7 @@ def oracle_image(model, image, root, output, config, mode, review, shared):
             "alternative_text_mask_tokens": int(alternative_text.sum()),
             "grid_tokens": all_text.size,
         }
-        if status in {"accepted", "automatic_smoke_only"}:
+        if status in {"accepted", "automatic_smoke_only", "automatic_provisional"}:
             selected = [word for word in image["words"] if word["id"] in word_ids]
             answer_mask = project(selected, clean.size, grid, rule, threshold)
             if not answer_mask.any():
@@ -141,11 +141,12 @@ def oracle_image(model, image, root, output, config, mode, review, shared):
     return {"rows": rows, "coverage": coverage}
 
 
-def oracle_report(output, manifest, mode, config, details, comparisons):
+def oracle_report(output, manifest, mode, config, details, comparisons, grounding_policy):
     by_status = Counter(row["grounding"] for row in details)
     grounded = [row for row in details if "mask_tokens" in row]
     write_json(output / "oracle_coverage.json", {
         "mode": mode, "images": len(manifest["images"]), "questions": len(details),
+        "grounding_policy": grounding_policy,
         "mask_rule": config["mask_rule"], "cell_overlap_threshold": config["cell_overlap_threshold"],
         "literal_candidates": sum(row["literal_candidate"] for row in details),
         "grounding_status": dict(by_status), "grounded_questions": len(grounded),
@@ -179,7 +180,9 @@ def oracle_report(output, manifest, mode, config, details, comparisons):
     text = [
         "# S0 diagnostic memo", "",
         f"Mode {mode}. Grounding usable for {len(grounded)}/{len(details)} questions.",
-        "Smoke uses provisional OCR matches when no review is supplied.", "",
+        f"Grounding policy: {grounding_policy}.",
+        *(["O3-O5 use provisional OCR matches pending human review."]
+          if grounding_policy in {"provisional_ocr_150", "smoke_ocr"} else []), "",
         "Paired 95% image-cluster intervals", "", *effects, "",
         "Inspect the alignment gate, mask overlays and coverage before interpreting these effects.",
         "Treat O1 as a clean-feature reference and O2–O5 as label-assisted diagnostic interventions.",

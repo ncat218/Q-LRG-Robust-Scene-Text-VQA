@@ -7,5 +7,10 @@
     "cpus": 4,
     "memory": "32G",
     "time": "00:30:00"
+  },
+  "full": {
+    "cpus": 4,
+    "memory": "32G",
+    "time": "03:00:00"
   }
 }

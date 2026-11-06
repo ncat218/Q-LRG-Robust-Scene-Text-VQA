@@ -33,7 +33,10 @@ def main():
             "configs/d0_baseline.yaml" if stage == "d0" else "configs/s0_oracle.yaml"
         ))
         if stage == "s0":
-            run.add_argument("--review", type=Path)
+            grounding = run.add_mutually_exclusive_group()
+            grounding.add_argument("--review", type=Path)
+            grounding.add_argument("--provisional-grounding", action="store_true",
+                                   help="Allow provisional OCR grounding for full S0")
             run.add_argument("--d0-run", type=Path, help="Matching D0 stage directory if kept under a different run")
     verify = commands.add_parser("verify-run")
     verify.add_argument("--stage", choices=("d0", "s0"), required=True)
@@ -83,6 +86,7 @@ def main():
             args.command, args.mode, args.manifest, paths,
             read_config(args.model_config), read_config(args.config), args.run_dir / args.command,
             review_path=getattr(args, "review", None),
+            allow_provisional=getattr(args, "provisional_grounding", False),
             d0_path=getattr(args, "d0_run", None) or args.run_dir / "d0",
         )
 

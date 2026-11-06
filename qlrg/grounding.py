@@ -11,23 +11,37 @@ from .common import atomic_write, read_jsonl, write_jsonl
 from .data import load_clean, rank
 
 
-def write_review_pack(manifest, root, output, limit):
-    output = Path(output)
+def candidate_pairs(manifest, limit):
     if limit < 1:
-        raise ValueError("Review limit must be positive")
-    if output.exists():
-        raise FileExistsError(output)
+        raise ValueError("Grounding limit must be positive")
     items = []
     for image in manifest["images"]:
         candidates = [q for q in image["questions"] if q["candidate"]]
         if candidates:
             question = min(candidates, key=lambda q: rank(manifest["seed"], q["question_id"]))
             items.append((image, question))
+            if len(items) == limit:
+                break
+    return items
+
+
+def provisional_grounding(manifest):
+    return {
+        q["question_id"]: {"status": "automatic_provisional", "word_ids": q["candidate"]["word_ids"]}
+        for _, q in candidate_pairs(manifest, 150)
+    }
+
+
+def write_review_pack(manifest, root, output, limit):
+    output = Path(output)
+    if output.exists():
+        raise FileExistsError(output)
+    items = candidate_pairs(manifest, limit)
     if not items:
         raise ValueError("No unambiguous candidate matches were found")
     output.mkdir(parents=True, exist_ok=False)
     rows, panels = [], []
-    for image, question in items[:limit]:
+    for image, question in items:
         match = question["candidate"]
         row = {
             "image_id": image["image_id"], "image_sha256": image["image_sha256"],

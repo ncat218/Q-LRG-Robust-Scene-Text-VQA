@@ -12,7 +12,7 @@ from .common import (
 )
 from .data import PROTOCOL, bicubic_control, load_clean, rank, verify_pillow
 from .evaluation import evaluator, summarize
-from .grounding import read_review
+from .grounding import provisional_grounding, read_review
 
 REQUIRED_D0_ARMS = {"CLEAN", "LR4-BIC-CONTROL"}
 REQUIRED_S0_ARMS = {"O0", "O1", "O2"}
@@ -128,7 +128,8 @@ def d0_image(model, image, root):
     return {"rows": rows}
 
 
-def execute(stage, mode, manifest_path, paths, model_config, config, output, review_path=None, d0_path=None):
+def execute(stage, mode, manifest_path, paths, model_config, config, output, review_path=None,
+            d0_path=None, allow_provisional=False):
     import torch
 
     from .oracle import oracle_image, oracle_report
@@ -154,15 +155,27 @@ def execute(stage, mode, manifest_path, paths, model_config, config, output, rev
         "torch_build": torch.__version__, "torch_cuda": torch.version.cuda,
     }
     review = {}
+    grounding_policy = None
     binding = {"shared": shared, "stage": stage, "config": config}
     if stage == "s0":
         d0 = verified_complete(d0_path, "d0")
         if d0["shared"] != shared or not read_json(d0_path / "identity.json")["passed"]:
             raise ValueError("S0 requires a completed, matching D0 identity gate")
-        if mode == "full" and review_path is None:
-            raise ValueError("Full S0 requires the reviewed grounding JSONL")
+        if allow_provisional and (mode != "full" or review_path is not None):
+            raise ValueError("Provisional grounding is a separate full S0 option")
         if review_path is not None:
+            grounding_policy = "human_reviewed"
             review = read_review(review_path, manifest)
+        elif allow_provisional:
+            grounding_policy = "provisional_ocr_150"
+            review = provisional_grounding(manifest)
+            if not review:
+                raise ValueError("No usable OCR candidates for provisional full S0")
+        elif mode == "smoke":
+            grounding_policy = "smoke_ocr"
+        else:
+            raise ValueError("Full S0 requires --review or explicit --provisional-grounding")
+        binding["grounding_policy"] = grounding_policy
         binding["d0_binding"] = object_hash(d0)
         binding["review_sha256"] = sha256(review_path) if review_path is not None else None
 
@@ -211,11 +224,12 @@ def execute(stage, mode, manifest_path, paths, model_config, config, output, rev
         comparisons = summarize(
             output, rows, manifest, stage,
             config.get("bootstrap_resamples", 10000), config.get("bootstrap_seed", 42),
+            grounding_policy=grounding_policy,
         )
         predictions = "oracle_predictions.jsonl" if stage == "s0" else "predictions.jsonl"
         write_jsonl(output / predictions, rows)
         if stage == "s0":
-            oracle_report(output, manifest, mode, config, details, comparisons)
+            oracle_report(output, manifest, mode, config, details, comparisons, grounding_policy)
         write_json(output / "runtime.json", {
             "job_id": os.environ["SLURM_JOB_ID"], "device": torch.cuda.get_device_name(),
             "peak_allocated_bytes_this_job": torch.cuda.max_memory_allocated(),

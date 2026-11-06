@@ -1,4 +1,4 @@
-"""Submit one D0/S0 smoke job from the UIT-HPC login node."""
+"""Submit one D0/S0 job from the UIT-HPC login node."""
 
 import argparse
 import os
@@ -21,7 +21,7 @@ exec "$@"
 """
 
 
-def write_job(run_dir, manifest, python, paths_config):
+def write_job(run_dir, manifest, python, paths_config, mode, images, review):
     python_cmd = [str(python), "-B", "-m", "qlrg.cli"]
     data_cmd = [*python_cmd, "--paths", paths_config]
     commands = [
@@ -36,16 +36,22 @@ def write_job(run_dir, manifest, python, paths_config):
         f"if [[ -f {shlex.quote(str(manifest))} ]]; then",
         "    " + shlex.join([*data_cmd, "validate-dataset", "--manifest", str(manifest)]),
         "else",
-        "    " + shlex.join([*data_cmd, "build-manifest", "--images", "12", "--output", str(manifest)]),
+        "    " + shlex.join([*data_cmd, "build-manifest", "--images", str(images), "--output", str(manifest)]),
         "fi",
     ]
+    s0_options = []
+    if mode == "full":
+        s0_options = ["--review", str(review)] if review else ["--provisional-grounding"]
     for stage in ("d0", "s0"):
+        stage_command = f'bash slurm/job.sh {stage} "$@"'
+        if stage == "s0" and s0_options:
+            stage_command += " " + shlex.join(s0_options)
         commands.extend([
-            f'bash slurm/job.sh {stage} "$@"',
+            stage_command,
             shlex.join([*python_cmd, "verify-run",
                         "--stage", stage, "--run-dir", str(run_dir)]),
         ])
-    script = run_dir / "smoke.sbatch"
+    script = run_dir / f"{mode}.sbatch"
     header = "#!/usr/bin/env bash\n#SBATCH --nodes=1\n#SBATCH --ntasks=1\nset -euo pipefail\n"
     script.write_bytes((header + "\n".join(commands) + "\n").encode("utf-8"))
     return script
@@ -53,8 +59,12 @@ def write_job(run_dir, manifest, python, paths_config):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--mode", choices=("smoke", "full"), default="smoke")
+    parser.add_argument("--review", type=Path, help="Approved grounding JSONL for full S0")
     parser.add_argument("--dry-run", action="store_true", help="Generate the script without setup or submission")
     args = parser.parse_args()
+    if args.review and (args.mode != "full" or not args.review.is_file()):
+        parser.error("--review requires full mode and an existing JSONL")
     if not args.dry_run and os.environ.get("SLURM_JOB_ID"):
         parser.error("Run this launcher from the UIT-HPC login node")
 
@@ -65,16 +75,21 @@ def main():
     runs = REPO / "runs"
     runs.mkdir(exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    run_dir = Path(tempfile.mkdtemp(prefix=f"smoke12-{stamp}-", dir=runs))
+    images = 500 if args.mode == "full" else 12
+    run_dir = Path(tempfile.mkdtemp(prefix=f"{args.mode}{images}-{stamp}-", dir=runs))
     manifest = run_dir / "manifest.json"
     script = write_job(
         run_dir, manifest, python,
         env.get("QLRG_PATHS_CONFIG", "configs/paths_hpc.yaml"),
+        args.mode, images, args.review.resolve() if args.review else None,
     )
     submit = [
-        sys.executable, "-B", "scripts/submit.py", "pipeline", "--mode", "smoke",
+        sys.executable, "-B", "scripts/submit.py", "pipeline", "--mode", args.mode,
         "--manifest", str(manifest), "--run-dir", str(run_dir), "--submit",
     ]
+    if args.mode == "full":
+        grounding = "reviewed JSONL" if args.review else "provisional OCR, up to 150 images"
+        print(f"Full D0/S0 evaluation on {images} images. O3-O5 grounding: {grounding}.", flush=True)
     print(f"Slurm script: {script}\nLogs: {run_dir / 'logs'}", flush=True)
     if args.dry_run:
         print(shlex.join(submit))

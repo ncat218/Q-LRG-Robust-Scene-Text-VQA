@@ -47,7 +47,7 @@ def paired_bootstrap(left, right, groups, repeats, seed):
     }
 
 
-def summarize(output, rows, manifest, stage, repeats, seed):
+def summarize(output, rows, manifest, stage, repeats, seed, grounding_policy=None):
     score_fn = evaluator()
     answer_key = {
         q["question_id"]: q["answers"] for image in manifest["images"] for q in image["questions"]
@@ -98,6 +98,7 @@ def summarize(output, rows, manifest, stage, repeats, seed):
             groups = [row["image_id"] for row in left]
             summaries.append({
                 "cohort": cohort, "slice": slice_name, "reference": reference, "target": target,
+                **({"grounding_policy": grounding_policy} if stage == "s0" else {}),
                 "questions": len(pairs), "images": len(set(groups)),
                 "reference_accuracy_pct": float(a.mean() * 100), "target_accuracy_pct": float(b.mean() * 100),
                 **paired_bootstrap(a, b, groups, repeats, seed),
