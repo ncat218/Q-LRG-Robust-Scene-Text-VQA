@@ -4,6 +4,9 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 repo="$PWD"
 venv="${QLRG_ENV:-$repo/.venv}"
 uv="${QLRG_UV:-uv}"
+if [[ -z "${QLRG_UV:-}" ]] && ! command -v uv >/dev/null; then
+    uv=/datastore/dungmt/textvqa/Tuan/monkeyocr_workspace/environment_and_models__phase1_verified_stack/uv_bootstrap/bin/uv
+fi
 command -v "$uv" >/dev/null || { echo "Set QLRG_UV to the absolute path to uv" >&2; exit 1; }
 export UV_CACHE_DIR="${QLRG_UV_CACHE:-$repo/.uv-cache}"
 export UV_PYTHON_INSTALL_DIR="${QLRG_UV_PYTHON:-$repo/.uv-python}"

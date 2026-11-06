@@ -4,6 +4,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 python="${QLRG_ENV:-$PWD/.venv}/bin/python"
 "$python" -B - <<'PY'
 import inspect
+import os
 import ssl
 import sys
 
@@ -16,7 +17,7 @@ from transformers import Qwen2_5_VLForConditionalGeneration
 from qlrg.common import dataset_paths, read_config, sha256
 from qlrg.evaluation import evaluator
 
-paths = dataset_paths(read_config("configs/paths_hpc.yaml"))
+paths = dataset_paths(read_config(os.environ.get("QLRG_PATHS_CONFIG", "configs/paths_hpc.yaml")))
 model = read_config("configs/model_qwen.yaml")
 snapshot = paths["hf_hub"] / ("models--" + model["id"].replace("/", "--")) / "snapshots" / model["revision"]
 for path in (

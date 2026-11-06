@@ -10,7 +10,7 @@ import yaml
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("stage", choices=("d0", "s0"))
+    parser.add_argument("stage", choices=("d0", "s0", "pipeline"))
     parser.add_argument("--mode", choices=("smoke", "full"), required=True)
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--run-dir", type=Path, required=True)
@@ -24,8 +24,10 @@ def main():
     args = parser.parse_args()
     if args.stage == "s0" and args.mode == "full" and args.review is None:
         parser.error("Full S0 requires --review")
-    if args.stage == "d0" and (args.review or args.d0_run):
+    if args.stage != "s0" and (args.review or args.d0_run):
         parser.error("--review and --d0-run only apply to S0")
+    if args.stage == "pipeline" and (args.mode != "smoke" or args.config):
+        parser.error("The generated pipeline supports smoke mode and default stage configs")
     if not args.manifest.is_file():
         parser.error("Manifest must exist before preparing a Slurm command")
 
@@ -42,15 +44,23 @@ def main():
         parser.error("mig2-35 supports 1 to 8 CPUs per job")
     run_dir = args.run_dir.resolve()
     logs = run_dir / "logs"
-    template = f"d0_{args.mode}.sbatch" if args.stage == "d0" else "s0_oracle.sbatch"
+    if args.stage == "pipeline":
+        script = run_dir / "smoke.sbatch"
+        if not script.is_file():
+            parser.error("Generate the pipeline with run_all.py first")
+        job_name = "qlrg-smoke"
+    else:
+        template = f"d0_{args.mode}.sbatch" if args.stage == "d0" else "s0_oracle.sbatch"
+        script = repo / "slurm" / template
+        job_name = f"qlrg-{args.stage}-{args.mode}"
     command = [
         "sbatch", "--parsable", f"--chdir={repo}",
-        f"--job-name=qlrg-{args.stage}-{args.mode}",
+        f"--job-name={job_name}",
         f"--account={config['account']}", f"--partition={config['partition']}",
         f"--qos={config['qos']}", f"--gres={config['gres']}",
         f"--cpus-per-task={cpus}", f"--mem={memory}", f"--time={time}",
         f"--output={logs}/%x-%j.out", f"--error={logs}/%x-%j.err",
-        str(repo / "slurm" / template), "--mode", args.mode,
+        str(script), "--mode", args.mode,
         "--manifest", str(args.manifest.resolve()), "--run-dir", str(run_dir),
     ]
     for flag, path in (("--review", args.review), ("--d0-run", args.d0_run), ("--config", args.config)):
