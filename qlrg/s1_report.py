@@ -31,6 +31,21 @@ PAIRS = [("A0", arm) for arm in LABELS if arm != "A0"] + [
 ]
 
 
+
+def arm_labels(config):
+    available = {**LABELS, **(EXTRA_LABELS if config.get("clean_controls", False) else {})}
+    selected = config.get("train_arms")
+    if selected is None:
+        return available
+    if (
+        not isinstance(selected, list) or not selected
+        or any(not isinstance(arm, str) or arm == "A0" or arm not in available for arm in selected)
+        or len(set(selected)) != len(selected)
+    ):
+        raise ValueError("train_arms must name distinct enabled training arms")
+    return {arm: label for arm, label in available.items() if arm == "A0" or arm in selected}
+
+
 def write_visuals(stage, condition, image_id, image, delta, grid):
     """Draw the per-token relative RMS residual on top of the input RGB image."""
     magnitude = delta.square().mean(dim=-1).sqrt().reshape(grid).cpu().numpy()
@@ -54,9 +69,11 @@ def write_visuals(stage, condition, image_id, image, delta, grid):
 
 
 def write_report(output, manifest, rows, stats, examples, config):
-    labels = {**LABELS, **{k: v for k, v in EXTRA_LABELS.items() if any(r["arm"] == k for r in rows)}}
-    pairs_to_report = [*PAIRS, *[("A0", arm) for arm in EXTRA_LABELS if arm in labels],
-                       *[(arm, "S1b") for arm in EXTRA_LABELS if arm in labels]]
+    labels = arm_labels(config)
+    if {row["arm"] for row in rows} != labels.keys():
+        raise ValueError("S1 prediction arms do not match the configured comparison")
+    pairs = PAIRS + [("A0", arm) for arm in EXTRA_LABELS] + [(arm, "S1b") for arm in EXTRA_LABELS]
+    pairs_to_report = [(left, right) for left, right in pairs if left in labels and right in labels]
     numeric = {
         q["question_id"] for image in manifest["images"] for q in image["questions"]
         if re.search(r"\d", Counter(q["answers"]).most_common(1)[0][0])

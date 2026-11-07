@@ -1,6 +1,8 @@
 """Repeat native and cached-injection A0 paths on the same questions."""
 
+import inspect
 import os
+from pathlib import Path
 
 import torch
 from filelock import FileLock
@@ -13,7 +15,24 @@ from .qwen_wrapper import Qwen
 from .s1_manifests import validate_s1_manifest
 
 
-def audit_summary(rows, manifest, repeats=10000, seed=42):
+
+AUDIT_POLICY = "within-path-repeatability-v2"
+LEGACY_SOURCE_HASH = "d22a29cf448d4d247de2c2302e09b23b6013cb49ad84a132d2a94e0e55c8c234"
+LEGACY_A0_PATH_HASH = "786a7b319e54830c990f43e2c92309049b37c83aad15eb19a32f085eaeaebb2b"
+
+
+def a0_path_hash():
+    """Bind cache, preprocessing, scoring and prediction code independently of training/reporting."""
+    from .s1_run import ImageFeatures, predict
+
+    files = ("data.py", "evaluation.py", "feature_injection.py", "grid_alignment.py",
+             "oracle.py", "qwen_wrapper.py", "s1_model.py")
+    root = Path(__file__).parent
+    signature = {name: sha256(root / name) for name in files}
+    signature.update({part.__name__: inspect.getsource(part) for part in (ImageFeatures, paired_images, predict)})
+    return object_hash(signature)
+
+def audit_summary(rows, manifest, repeats=10000, seed=42, diagnostics=()):
     expected = {(im["image_id"], q["question_id"]) for im in manifest["images"] for q in im["questions"]}
     by_path = {}
     for row in rows:
@@ -48,22 +67,53 @@ def audit_summary(rows, manifest, repeats=10000, seed=42):
                 "condition": condition, "left": list(left), "right": list(right), "questions": len(a),
                 "different_token_sequences": sum(x["token_ids"] != y["token_ids"] for x, y in zip(a, b)),
                 "different_scores": sum(x["score"] != y["score"] for x, y in zip(a, b)),
+                "mean_absolute_score_change_pp": 100 * sum(
+                    abs(row["left_score"] - row["right_score"]) for row in changed
+                ) / len(a),
                 "changed": changed,
                 **paired_bootstrap([x["score"] for x in a], [y["score"] for y in b],
                                    [key[0] for key in ordered], repeats, seed),
             })
-    return {"passed": all(not row["changed"] for row in contrasts), "contrasts": contrasts,
-            "scope": "Two full passes in one job, batch size one, native versus first-question cached image features."}
+    metrics = ("different_token_sequences", "different_scores", "mean_absolute_score_change_pp")
+    limits = {}
+    for condition in ("CLEAN", "LR4"):
+        same_path = [r for r in contrasts if r["condition"] == condition and r["left"][0] == r["right"][0]]
+        cross_path = [r for r in contrasts if r["condition"] == condition and r["left"][0] != r["right"][0]]
+        observed = {metric: max(r[metric] for r in cross_path) for metric in metrics}
+        limit = {metric: max(r[metric] for r in same_path) for metric in metrics}
+        limits[condition] = {
+            "same_path_max": limit, "cross_path_max": observed,
+            "passed": all(observed[metric] <= limit[metric] for metric in metrics),
+        }
+    feature_checks_passed = all(row["cached_equals_fresh"] and row["prefill_equal"] for row in diagnostics)
+    return {
+        "passed": feature_checks_passed and all(result["passed"] for result in limits.values()),
+        "policy": AUDIT_POLICY,
+        "exact_match": all(not row["changed"] for row in contrasts),
+        "repeatability": limits,
+        "feature_checks_passed": feature_checks_passed,
+        "contrasts": contrasts,
+        "scope": "Two full passes in one job, batch size one, native versus first-question cached image features.",
+    }
 
 
 def validate_audit(output, shared):
     binding = verified_complete(output, "audit")
-    for name in ("paths", "model", "packages", "torch_build", "torch_cuda", "device", "preprocessing", "source_hash"):
-        if binding["shared"][name] != shared[name]:
+    saved = binding["shared"]
+    for name in ("paths", "model", "packages", "torch_build", "torch_cuda", "device", "preprocessing"):
+        if saved[name] != shared[name]:
             raise ValueError(f"A0 audit environment differs in {name}")
-    if not read_json(output / "summary.json")["passed"]:
-        raise ValueError("Resolve the A0 repeatability/path differences before expanded S1")
-    return object_hash(binding)
+    if saved["source_hash"] != shared["source_hash"]:
+        audited_path = saved.get("a0_path_hash")
+        if audited_path is None and saved["source_hash"] == LEGACY_SOURCE_HASH:
+            audited_path = LEGACY_A0_PATH_HASH
+        if not audited_path or audited_path != shared.get("a0_path_hash"):
+            raise ValueError("A0 inference code changed; run a fresh audit")
+    summary = audit_summary(read_jsonl(output / "predictions.jsonl"), read_json(output / "manifest.json"),
+                            diagnostics=read_json(output / "diagnostics.json"))
+    if not summary["passed"]:
+        raise ValueError("A0 path differences exceed the measured repeatability or feature checks failed")
+    return object_hash(binding), summary
 
 
 def run_audit(source, output, paths, model_config, pilot=None):
@@ -160,7 +210,7 @@ def run_audit(source, output, paths, model_config, pilot=None):
                 diagnostics.extend(shard["diagnostics"])
                 if (index + 1) % 50 == 0:
                     print(f"A0 audit pass {repeat}: {index+1}/{len(manifest['images'])} images", flush=True)
-        summary = audit_summary(rows, manifest)
+        summary = audit_summary(rows, manifest, diagnostics=diagnostics)
         historical = {}
         old_sources = [("d0", source / "d0" / "predictions.jsonl",
                         {"CLEAN": "CLEAN", "LR4": "LR4-BIC-CONTROL"})]

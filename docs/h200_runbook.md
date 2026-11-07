@@ -114,17 +114,32 @@ The audit job also verifies the pilot's actual training manifest against its sav
 
 After the GPU audit, the job prepares three independent OCR-free manifests under `datasets/`. Image files are resolved under the configured TextVQA root. The builder checks source annotation hashes, image bytes, answer counts and overlap across train_inner, val_inner and official_val. Counts come from the actual data. Dataset preparation stops if required validation images are unavailable. The job packages the audit and complete manifests into `review.tar.gz` in its run directory.
 
-Expanded training requires a completed passing audit for the same code, model, preprocessing, package versions, device and paths. The supplied expanded configuration is a candidate with all train_inner images, two epochs, 40% clean images and a 0.1 additional clean-residual penalty. It includes six trained variants plus A0. Tune these choices on val_inner. It is not a convergence claim.
+Expanded training requires the audit stage directory, for example `runs/audit-…/audit`, containing `COMPLETE.json`. The worker rechecks its artifacts and environment and assesses the prediction rows against the observed within-path repeatability. The recorded audit with source hash `d22a29cf…` can be reused when the inference path fingerprint matches. Its original exact-token result remains in the archived report. The supplied expanded configuration is a candidate with all train_inner images, two epochs, 40% clean images and a 0.1 additional clean-residual penalty. It includes six trained variants plus A0. Tune these choices on val_inner. It is not a convergence claim.
 
 The following is a training template for a later approved allocation. Replace the audit directory with the actual printed run path.
 
 ```bash
 audit_run=runs/audit-<timestamp>-<suffix>
 export QLRG_FEATURE_CACHE="$PWD/runs/shared-features"
+mkdir -p "$QLRG_FEATURE_CACHE"
+df -h "$QLRG_FEATURE_CACHE"
 python3 run_all.py --mode s1 \
   --data-dir "$audit_run/datasets" --baseline-audit "$audit_run/audit" \
-  --s1-config configs/s1_expanded.json --time 24:00:00
+  --s1-config configs/s1_expanded.json --time 2-00:00:00
 ```
+
+The command above uses the default learning rate of 2e-4 and seed 42 for the full run. For a shorter sweep first, use the following commands with the same audit and cache variables.
+
+```bash
+python3 scripts/prepare_s1_study.py --short-sweep --output local/s1-lr-pilot
+python3 run_all.py --mode s1 \
+  --data-dir "$audit_run/datasets" --baseline-audit "$audit_run/audit" \
+  --s1-config local/s1-lr-pilot/seed42-lr0.0002.json
+```
+
+The generator prepares 1e-4, 2e-4 and 5e-4 with 4,000 training images and one epoch. Each job trains S1b, A1 and A2 on the same data, and evaluates them with A0 on val_inner. Use the other generated configs when running those rates. Reserve time for evaluation and cache setup in addition to the estimated training time. Keep A0 from the same job for comparisons.
+
+After interruption, use `python3 run_all.py --mode s1 --resume "$run" --time 2-00:00:00` to continue from the last saved checkpoint in a large run.
 
 For a learning-rate sweep and repeated seeds, generate candidate JSON configs from `configs/s1_expanded.json` using `python3 scripts/prepare_s1_study.py --output local/s1-study`. The default grid is three seeds (42, 43, 44) and three learning rates (5e-5, 1e-4, 2e-4). This prepares nine candidate configurations. Schedule the budget after the A0 audit and data counts are reviewed. Give every arm the same candidate grid, data, example count and optimizer-step budget. Evaluate candidates on val_inner, record the selection rule, then use at least three distinct seeds for the selected regime. Record each seed separately before aggregating image-paired effects and seed variability. The expanded run reports A1clean and A2clean, which use the same question and answer schedule as the other arms but CLEAN inputs throughout.
 

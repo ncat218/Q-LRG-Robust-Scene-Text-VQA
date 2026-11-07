@@ -78,9 +78,12 @@ def verified_complete(output, stage, fingerprint=None):
                "oracle_coverage.json", "decision.md"},
         "s1": {"predictions.jsonl", "identity.json", "summary.json", "summary.csv", "train_manifest.json",
                "review.html", "review-clean.html", "baseline_audit.json", "gradient_gate.json", "feature_regressions.json",
-               "training_history.csv",
-               *(f"variants/{arm}/checkpoint.pt" for arm in ("S1a", "S1b", "A1", "A2"))},
+               "training_history.csv"},
     }[stage]
+    if stage == "s1":
+        from .s1_report import arm_labels
+
+        required.update(f"variants/{arm}/checkpoint.pt" for arm in arm_labels(binding["config"]) if arm != "A0")
     if not required <= complete["artifacts"].keys():
         raise ValueError(f"Missing required artifacts in completion marker {output}")
     for name, digest in complete["artifacts"].items():
@@ -96,7 +99,7 @@ def paired_images(root, image):
     return clean, bicubic_control(clean)
 
 
-def d0_identity(model, manifest, root, count, output):
+def d0_identity(model, manifest, root, count, output, require_decode=True):
     from .qwen_wrapper import assert_aligned
 
     if count < 1:
@@ -113,16 +116,25 @@ def d0_identity(model, manifest, root, count, output):
         grids.add(grid)
         reference = model.prepare(clean, q["question"])
         assert_aligned(reference, base)
+        checks = {}
+        for name, native in (("o0_vs_native_lr4", base), ("o1_vs_native_clean", reference)):
+            feature = model.encode(native)
+            if require_decode:
+                checks[name] = model.compare(native, base, feature)
+            else:
+                expected = model.prefill_logits(native)
+                actual = model.prefill_logits(base, feature)
+                if not expected.equal(actual):
+                    raise RuntimeError(f"Identity prefill mismatch for {image['image_id']}: {name}")
+                checks[name] = {"max_abs_logit_difference": 0.0}
         results.append({
-            "image_id": image["image_id"], "question_id": q["question_id"], "grid_thw": grid,
-            "o0_vs_native_lr4": model.compare(base, base, model.encode(base)),
-            "o1_vs_native_clean": model.compare(reference, base, model.encode(reference)),
+            "image_id": image["image_id"], "question_id": q["question_id"], "grid_thw": grid, **checks,
         })
         if len(results) == count:
             break
     if len(results) < min(count, len(manifest["images"])):
         raise RuntimeError("Manifest has too few distinct grids for the requested D0 identity audit")
-    write_json(output, {"passed": True, "images": results})
+    write_json(output, {"passed": True, "decode_required": require_decode, "images": results})
 
 
 def d0_image(model, image, root):

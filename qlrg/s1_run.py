@@ -23,14 +23,16 @@ from .oracle import feature_pair
 from .qwen_wrapper import Qwen, assert_aligned
 from .s1_data import build_train_plan, compare_archived_baselines, read_eval_anchor, training_examples
 from .s1_model import LanguageLoRA, VisualResidual, teacher_forced_loss, text_training
-from .s1_report import LABELS, EXTRA_LABELS, CONDITIONS, write_report, write_visuals
+from .s1_report import CONDITIONS, EXTRA_LABELS, arm_labels, write_report, write_visuals
 
 
 def runtime_shared(paths, model_config):
+    from .a0_audit import a0_path_hash
+
     packages = {name: importlib.metadata.version(name) for name in (
         "torch", "torchvision", "transformers", "Pillow", "safetensors", "numpy", "tokenizers", "huggingface-hub",
     )}
-    return {"model": model_config, "source_hash": code_hash(), "packages": packages,
+    return {"model": model_config, "source_hash": code_hash(), "a0_path_hash": a0_path_hash(), "packages": packages,
               "torch_build": torch.__version__, "torch_cuda": torch.version.cuda, "preprocessing": PROTOCOL,
               "device": torch.cuda.get_device_name(),
               "paths": {key: str(value) for key, value in paths.items()}}
@@ -277,19 +279,20 @@ def run_s1(source, output, paths, model_config, config, dataset_dir=None, audit_
         manifest = datasets["val_inner"]
         d0_binding, s0_binding = None, None
     shared = runtime_shared(paths, model_config)
-    audit_binding = None
+    audit_binding, audit_assessment = None, None
     if dataset_dir is not None:
         from .a0_audit import validate_audit
 
         if audit_path is None:
             raise ValueError("Expanded S1 requires a passing A0 audit")
-        audit_binding = validate_audit(audit_path, shared)
-    labels = {**LABELS, **(EXTRA_LABELS if config.get("clean_controls", False) else {})}
+        audit_binding, audit_assessment = validate_audit(audit_path, shared)
+    labels = arm_labels(config)
     binding = {"stage": "s1", "config": config, "shared": shared, "source": str(source.resolve()) if source else None,
                "d0_binding": d0_binding, "s0_binding": s0_binding, "eval_manifest": object_hash(manifest)}
     if dataset_dir is not None:
         binding.update({"dataset_hashes": dataset_hashes, "dataset_dir": str(dataset_dir.resolve()),
-                        "audit_binding": audit_binding, "evaluation_role": "hyperparameter_selection"})
+                        "audit_binding": audit_binding, "audit_policy": audit_assessment["policy"],
+                        "evaluation_role": "hyperparameter_selection"})
     output.mkdir(parents=True, exist_ok=True)
     with FileLock(str(output / ".run.lock"), timeout=0):
         plan_path = output / "train_manifest.json"
@@ -320,12 +323,13 @@ def run_s1(source, output, paths, model_config, config, dataset_dir=None, audit_
 
         write_json(output / "baseline_audit.json",
                    compare_archived_baselines(source, manifest) if datasets is None else
-                   {"audit_binding": audit_binding, "audit_run": str(audit_path.resolve())})
+                   {"audit_binding": audit_binding, "audit_run": str(audit_path.resolve()),
+                    "assessment": audit_assessment})
         write_json(output / "eval_manifest.json", manifest)
         qwen = Qwen(model_config, paths["hf_hub"])
         identity = output / "identity.json"
         if not identity.exists():
-            d0_identity(qwen, manifest, paths["textvqa"], 4, identity)
+            d0_identity(qwen, manifest, paths["textvqa"], 4, identity, require_decode=datasets is None)
         if not read_json(identity)["passed"]:
             raise RuntimeError("S1 identity gate failed")
         cache = ImageFeatures(qwen, paths["textvqa"], output, shared)

@@ -56,8 +56,13 @@ class ExpandedS1Test(unittest.TestCase):
         self.assertTrue(audit_summary(rows, manifest, repeats=10)["passed"])
         rows[-1]["token_ids"] = [1, 3]
         summary = audit_summary(rows, manifest, repeats=10)
-        self.assertFalse(summary["passed"])
+        self.assertTrue(summary["passed"])
+        self.assertFalse(summary["exact_match"])
         self.assertTrue(all(c["different_scores"] == 0 for c in summary["contrasts"]))
+        diagnostics = [{"cached_equals_fresh": True, "prefill_equal": False}]
+        self.assertFalse(audit_summary(rows, manifest, repeats=10, diagnostics=diagnostics)["passed"])
+        rows[-2]["token_ids"] = [1, 3]
+        self.assertFalse(audit_summary(rows, manifest, repeats=10)["passed"])
         with self.assertRaisesRegex(ValueError, "Incomplete"):
             audit_summary(rows[:-1], manifest, repeats=10)
 
@@ -155,7 +160,7 @@ class ExpandedS1Test(unittest.TestCase):
             cases = [
                 ["--mode", "audit", "--from-run", str(anchor), "--pilot-run", str(anchor)],
                 ["--mode", "s1", "--data-dir", str(data), "--baseline-audit", str(audit),
-                 "--s1-config", str(config), "--time", "24:00:00"],
+                 "--s1-config", str(config), "--time", "2-00:00:00"],
                 ["--mode", "s1-eval", "--from-run", str(anchor)],
             ]
             for args in cases:
@@ -174,7 +179,7 @@ class ExpandedS1Test(unittest.TestCase):
                     if mode == "s1":
                         self.assertEqual((run / "s1.yaml").read_bytes(), config.read_bytes())
                         self.assertIn("--data-dir", script)
-                        self.assertEqual(command[-2:], ["--time", "24:00:00"])
+                        self.assertEqual(command[-2:], ["--time", "2-00:00:00"])
                     with patch.object(sys, "argv", ["run_all.py", "--mode", mode, "--resume", str(run)]):
                         run_all.main()
 
@@ -224,7 +229,7 @@ class ExpandedS1Test(unittest.TestCase):
                 ("qlrg.s1_evaluate.read_s1_manifests", {"return_value": (datasets, {"train_inner": "h1", "val_inner": "h2", "official_val": "h3"})}),
                 ("qlrg.s1_run.runtime_shared", {"return_value": shared}),
                 ("qlrg.s1_evaluate.runtime_shared", {"return_value": shared}),
-                ("qlrg.a0_audit.validate_audit", {"return_value": "audit-hash"}),
+                ("qlrg.a0_audit.validate_audit", {"return_value": ("audit-hash", {"policy": "within-path-repeatability-v2"})}),
                 ("qlrg.s1_run.Qwen", {"return_value": qwen}),
                 ("qlrg.s1_evaluate.Qwen", {"return_value": qwen}),
                 ("qlrg.s1_run.ImageFeatures", {}),
@@ -237,7 +242,7 @@ class ExpandedS1Test(unittest.TestCase):
                 ("qlrg.s1_evaluate.make_adapter", {"side_effect": lambda q, a, c: None if a == "A0" else torch.nn.Linear(1, 1)}),
                 ("torch.cuda.reset_peak_memory_stats", {}),
                 ("torch.cuda.max_memory_allocated", {"return_value": 0}),
-                ("qlrg.s1_run.d0_identity", {"side_effect": lambda q, m, r, n, path: write_json(path, {"passed": True})}),
+                ("qlrg.s1_run.d0_identity", {"side_effect": lambda q, m, r, n, path, **kwargs: write_json(path, {"passed": True})}),
             ):
                 stack.enter_context(patch(target, **kwargs))
             stack.enter_context(patch.dict(os.environ, {"SLURM_JOB_ID": "test"}))
@@ -255,6 +260,18 @@ class ExpandedS1Test(unittest.TestCase):
             predictions = (root / "official" / "s1_eval" / "predictions.jsonl").read_text()
             self.assertNotIn('"image_id": "3"', predictions)
 
+
+            trained_conditions.clear()
+            sweep = root / "sweep" / "s1"
+            short_config = {**config, "train_images": 2, "epochs": 1, "clean_controls": False,
+                            "train_arms": ["S1b", "A1", "A2"]}
+            run_s1(None, sweep, {"textvqa": root, "hf_hub": root}, {"max_pixels": 3136}, short_config,
+                   dataset_dir=root / "dataset", audit_path=root / "audit")
+            verified_complete(sweep, "s1")
+            self.assertEqual(set(trained_conditions), {"S1b", "A1", "A2"})
+            summary = read_json(sweep / "summary.json")
+            self.assertEqual(set(summary["arm_labels"]), {"A0", "S1b", "A1", "A2"})
+
     def test_study_configs_vary_only_seed_and_learning_rate(self):
         from scripts.prepare_s1_study import prepare
 
@@ -268,6 +285,15 @@ class ExpandedS1Test(unittest.TestCase):
             self.assertEqual(len(metadata["candidates"]), 6)
             self.assertTrue(all(read_json(output / c["config"])["epochs"] == 2 for c in metadata["candidates"]))
             self.assertEqual({c["seed"] for c in metadata["candidates"]}, {42, 43, 44})
+            short = root / "short"
+            prepare(short, template, [42], [0.0001, 0.0002, 0.0005], short_sweep=True)
+            candidates = read_json(short / "study.json")["candidates"]
+            self.assertEqual(len(candidates), 3)
+            for candidate in candidates:
+                config = read_json(short / candidate["config"])
+                self.assertEqual((config["train_images"], config["epochs"]), (4000, 1))
+                self.assertEqual(config["train_arms"], ["S1b", "A1", "A2"])
+                self.assertFalse(config["clean_controls"])
 
     def test_clean_penalty_is_separate_from_lr4_penalty(self):
         from types import SimpleNamespace

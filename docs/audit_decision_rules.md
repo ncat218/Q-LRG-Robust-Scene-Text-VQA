@@ -17,7 +17,14 @@ Ghi ngày 07/11/2026, trước khi tiếp nhận kết quả audit A0. Quy tắc
 
 Tỷ lệ câu đổi token có đơn vị khác delta accuracy tính bằng điểm phần trăm. Hai lần lặp chỉ cung cấp một phép kiểm tra độ lặp lại. Để định lượng biến thiên chạy lại cần thêm lần lặp hoặc job độc lập, cùng với phân bố chênh lệch điểm. Mức biến thiên đó phải được so với hiệu ứng cần phát hiện và CI của hiệu ứng.
 
-Cổng tự động hiện tại chỉ cho S1 mở rộng qua khi mọi cặp audit khớp. Kết quả có sai khác được giữ để điều tra và sửa thiết kế. Thay đổi tiêu chí chấp nhận cần được ghi lại trước lượt train lớn.
+Cổng ban đầu yêu cầu mọi cặp khớp token. Sau khi nhận audit 500 ảnh, quy tắc cho pilot được cập nhật thành `within-path-repeatability-v2`.
+
+- Với từng điều kiện CLEAN và LR4, lấy mức lớn nhất của hai so sánh native–injection và đối chiếu với mức lớn nhất của hai so sánh lặp cùng đường. Kiểm tra số câu khác token, số câu đổi điểm và trung bình độ đổi điểm tuyệt đối.
+- Các ca có chẩn đoán phải khớp feature cache với feature tính lại và khớp logits prefill. S1 mở rộng vẫn kiểm tra prefill trên các grid thử đầu job.
+- Dữ liệu đã lưu cho CLEAN khớp toàn bộ. Với LR4, hai đường lệch tối đa 2 câu về token và 1 câu về điểm, so với 3 và 1 ở các cặp cùng đường. Độ đổi điểm tuyệt đối trung bình lớn nhất là 0,126 điểm phần trăm cho cả hai loại so sánh. Gói audit đã lưu đủ điều kiện theo quy tắc mới.
+- Giữ kết quả `passed` cũ trong artifact lịch sử. Lượt S1 ghi đánh giá theo quy tắc mới vào `baseline_audit.json` sau khi xác minh checksum, môi trường và mã nguồn của đường suy luận. A0 chạy trong cùng job với các arm.
+
+Quy tắc này dùng độ lặp quan sát trên hai lượt của audit để quyết định có thể chạy pilot. Nó chưa thiết lập ngưỡng nhiễu chung cho các job khác hoặc xác định độ sát của logits khi decode.
 
 ## Đọc S0 và S1 đúng cohort
 
@@ -57,7 +64,7 @@ Loss train giảm là động lực mở rộng thử nghiệm. Cần theo dõi 
 
 Nếu tạm lấy N = 31.000 và hai epoch, sáu arm train có tổng dự toán thô khoảng 24 giờ/seed. Thêm S1b có trọng số chữ đưa tổng lên khoảng 28 giờ/seed, tức khoảng 84 giờ cho ba seed trước chi phí đánh giá và các learning rate khác. Đây là ngoại suy từ pilot.
 
-Mode full của D0/S0 có walltime 3 giờ. Mode s1 mặc định 6 giờ, còn ví dụ mở rộng dùng override 24 giờ. Walltime là giới hạn mỗi allocation. Lập kế hoạch các chunk có checkpoint dựa trên ngân sách và thời gian đo thực tế. Kiểm tra cả dung lượng feature cache trước khi duyệt full study.
+Mode full của D0/S0 có walltime 3 giờ. Mode s1 mặc định 6 giờ, còn ví dụ mở rộng yêu cầu 2 ngày với `--time 2-00:00:00`. Walltime là giới hạn mỗi allocation. Lập kế hoạch các chunk có checkpoint dựa trên ngân sách và thời gian đo thực tế. Kiểm tra cả dung lượng feature cache trước khi duyệt full study.
 
 Chọn learning rate trên một ngân sách development nhỏ và ngang nhau giữa các arm trước, sau đó dùng ít nhất ba seed cho cấu hình đã chọn. Chạy ablation riêng nếu muốn quy nguyên nhân cho việc tăng dữ liệu, tăng tỷ lệ CLEAN hoặc thêm phạt residual sạch. Bản mẫu mở rộng đang thay nhiều yếu tố đồng thời và đo hiệu quả của cả cấu hình đó.
 

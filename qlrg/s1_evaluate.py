@@ -12,7 +12,7 @@ from .evaluation import evaluator
 from .experiment import verified_complete
 from .qwen_wrapper import Qwen
 from .s1_manifests import read_s1_manifests
-from .s1_report import LABELS, EXTRA_LABELS, write_report
+from .s1_report import arm_labels, write_report
 from .s1_run import ImageFeatures, make_adapter, predict, runtime_shared
 
 
@@ -30,7 +30,7 @@ def evaluate_s1(source, output, paths, model_config):
     if shared != trained["shared"]:
         raise ValueError("Use the same model, source code, paths and environment as the locked training run")
     config = trained["config"]
-    labels = {**LABELS, **(EXTRA_LABELS if config.get("clean_controls", False) else {})}
+    labels = arm_labels(config)
     checkpoint_hashes = {a: sha256(source / "s1" / "variants" / a / "checkpoint.pt") for a in labels if a != "A0"}
     binding = {"stage": "s1_eval", "shared": shared, "trained_binding": object_hash(trained),
                "checkpoints": checkpoint_hashes, "evaluation_role": "official_val_locked",
