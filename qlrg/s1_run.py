@@ -24,6 +24,7 @@ from .qwen_wrapper import Qwen, assert_aligned
 from .s1_data import build_train_plan, compare_archived_baselines, read_eval_anchor, training_examples
 from .s1_model import LanguageLoRA, VisualResidual, teacher_forced_loss, text_training
 from .s1_report import CONDITIONS, EXTRA_LABELS, arm_labels, write_report, write_visuals
+from .s1_storage import checkpoint_steps, feature_cache_mode, resume_runtime
 
 
 def runtime_shared(paths, model_config):
@@ -43,8 +44,11 @@ def validate_config(config):
         raise ValueError("S1 seed must be an integer and clean_controls must be a boolean")
     if config["train_images"] != "all" and (type(config["train_images"]) is not int or config["train_images"] < 1):
         raise ValueError("train_images must be a positive integer or all")
-    for key in ("epochs", "accumulate", "checkpoint_every", "hidden",
-                "spatial_blocks", "lora_rank", "max_answer_tokens", "bootstrap_resamples"):
+    cadence = {"checkpoint_every", "checkpoint_saves"} & config.keys()
+    if len(cadence) != 1:
+        raise ValueError("Choose exactly one of checkpoint_every and checkpoint_saves")
+    for key in ("epochs", "accumulate", *cadence, "hidden", "spatial_blocks",
+                "lora_rank", "max_answer_tokens", "bootstrap_resamples"):
         if type(config[key]) is not int or config[key] < 1:
             raise ValueError(f"S1 requires a positive integer for {key}")
     clean_penalty = config.get("clean_residual_weight", 0)
@@ -130,6 +134,7 @@ def loss_for(qwen, arm, adapter, cache, question, condition, answer, config):
 
 
 def train(qwen, arm, adapter, cache, examples, config, path, fingerprint):
+    save_steps = checkpoint_steps(config, len(examples))
     optimizer = torch.optim.AdamW(adapter.parameters(), lr=config["learning_rate"], weight_decay=config["weight_decay"])
     offset, history = 0, []
     if path.is_file():
@@ -172,7 +177,7 @@ def train(qwen, arm, adapter, cache, examples, config, path, fingerprint):
             offset += len(group)
             history.append({"examples": offset, "loss": average, "grad_norm": norm,
                             "seconds": time.perf_counter() - start})
-            if len(history) % config["checkpoint_every"] == 0 or offset == len(examples):
+            if len(history) in save_steps:
                 if is_cuda:
                     history[-1]["peak_allocated_bytes"] = torch.cuda.max_memory_allocated(qwen.device)
                 buf = io.BytesIO()
@@ -297,7 +302,10 @@ def run_s1(source, output, paths, model_config, config, dataset_dir=None, audit_
     with FileLock(str(output / ".run.lock"), timeout=0):
         plan_path = output / "train_manifest.json"
         binding_path = output / "run.json"
+        saved = None
         if binding_path.is_file():
+            saved = read_json(binding_path)
+            binding["shared"] = resume_runtime(saved["shared"], shared)
             plan = read_json(plan_path)
         else:
             if datasets is None:
@@ -311,8 +319,8 @@ def run_s1(source, output, paths, model_config, config, dataset_dir=None, audit_
             write_json(plan_path, plan)
         binding["train_manifest"] = object_hash(plan)
         fingerprint = object_hash(binding)
-        if binding_path.is_file():
-            if read_json(binding_path) != binding:
+        if saved is not None:
+            if saved != binding:
                 raise ValueError("S1 binding changed; use the original code/config or start a new run")
         else:
             write_json(binding_path, binding)
@@ -332,18 +340,27 @@ def run_s1(source, output, paths, model_config, config, dataset_dir=None, audit_
             d0_identity(qwen, manifest, paths["textvqa"], 4, identity, require_decode=datasets is None)
         if not read_json(identity)["passed"]:
             raise RuntimeError("S1 identity gate failed")
-        cache = ImageFeatures(qwen, paths["textvqa"], output, shared)
+        cache = ImageFeatures(qwen, paths["textvqa"], output, binding["shared"])
         if datasets is not None:
             cache_root = Path(os.environ.get("QLRG_FEATURE_CACHE", output / "features"))
-            cache_root.mkdir(parents=True, exist_ok=True)
+            mode = feature_cache_mode()
             max_tokens = model_config["max_pixels"] // (28 * 28) + 128
             estimate = max_tokens * qwen.model.config.text_config.hidden_size * 4 * (len(plan) + len(manifest["images"]))
-            free = shutil.disk_usage(cache_root).free
-            write_json(output / "storage.json", {"cache": str(cache_root), "estimated_upper_bytes": estimate, "free_bytes": free})
-            # Existing cache entries may be reusable, so the full bound is informational.
-            next_pair_bound = max_tokens * qwen.model.config.text_config.hidden_size * 4
-            if free < 2 * next_pair_bound:
-                raise RuntimeError("Insufficient free space to atomically write the next feature pair")
+            if mode == "write":
+                cache_root.mkdir(parents=True, exist_ok=True)
+                free = shutil.disk_usage(cache_root).free
+                next_pair_bound = max_tokens * qwen.model.config.text_config.hidden_size * 4
+                if free < 2 * next_pair_bound:
+                    raise RuntimeError("Insufficient free space to atomically write the next feature pair")
+            else:
+                estimate = 0
+                free = shutil.disk_usage(output).free
+            write_json(output / "storage.json", {
+                "cache": str(cache_root), "feature_cache_mode": mode, "estimated_upper_bytes": estimate,
+                "free_bytes": free, "runtime_source_hash": shared["source_hash"],
+                "checkpoint_saves_override": os.environ.get("QLRG_CHECKPOINT_SAVES"),
+            })
+            print(f"S1 feature cache mode: {mode}", flush=True)
         examples = list(training_examples(plan, config["epochs"], config["seed"], config["clean_fraction"]))
         gradient_gate = output / "gradient_gate.json"
         if not gradient_gate.exists():

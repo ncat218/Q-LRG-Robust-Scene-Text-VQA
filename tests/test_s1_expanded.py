@@ -216,7 +216,7 @@ class ExpandedS1Test(unittest.TestCase):
 
         qwen = SimpleNamespace(model=SimpleNamespace(config=SimpleNamespace(
             text_config=SimpleNamespace(hidden_size=8))))
-        shared = {"model": {}, "paths": {}}
+        shared = {"model": {}, "paths": {}, "source_hash": "test-source"}
         with tempfile.TemporaryDirectory() as directory, ExitStack() as stack:
             root = Path(directory)
             output = root / "training" / "s1"

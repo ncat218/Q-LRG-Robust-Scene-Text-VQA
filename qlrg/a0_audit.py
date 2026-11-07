@@ -13,6 +13,7 @@ from .evaluation import evaluator, paired_bootstrap
 from .experiment import paired_images, validate_manifest, verified_complete
 from .qwen_wrapper import Qwen
 from .s1_manifests import validate_s1_manifest
+from .s1_storage import accepts_prior_audit
 
 
 
@@ -107,7 +108,9 @@ def validate_audit(output, shared):
         audited_path = saved.get("a0_path_hash")
         if audited_path is None and saved["source_hash"] == LEGACY_SOURCE_HASH:
             audited_path = LEGACY_A0_PATH_HASH
-        if not audited_path or audited_path != shared.get("a0_path_hash"):
+        if not audited_path or (
+            audited_path != shared.get("a0_path_hash") and not accepts_prior_audit(audited_path, shared)
+        ):
             raise ValueError("A0 inference code changed; run a fresh audit")
     summary = audit_summary(read_jsonl(output / "predictions.jsonl"), read_json(output / "manifest.json"),
                             diagnostics=read_json(output / "diagnostics.json"))

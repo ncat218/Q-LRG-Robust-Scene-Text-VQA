@@ -17,6 +17,7 @@ from .evaluation import oracle_decision_memo
 from .feature_injection import replace_region
 from .grid_alignment import dilate, image_grid, project, random_region
 from .qwen_wrapper import assert_aligned
+from .s1_storage import feature_cache_mode
 
 
 def feature_pair(model, image, reference, base, output, shared):
@@ -31,18 +32,28 @@ def feature_pair(model, image, reference, base, output, shared):
     cache = Path(os.environ.get("QLRG_FEATURE_CACHE", output / "features"))
     path = cache / f"{key}.safetensors"
     h, w = image_grid(base["image_grid_thw"][0].tolist())
-    cache.mkdir(parents=True, exist_ok=True)
-    with FileLock(str(cache / f"{key}.lock")):
-        if not path.exists():
-            features = {
-                "clean": model.encode(reference).cpu().contiguous(),
-                "degraded": model.encode(base).cpu().contiguous(),
-            }
-            atomic_write(path, save(features, metadata={"key": key}))
+
+    def read_pair():
         with safe_open(path, framework="pt", device="cpu") as handle:
             if handle.metadata() != {"key": key}:
                 raise ValueError(f"Feature cache metadata differs from the requested key: {path}")
-            loaded = {name: handle.get_tensor(name) for name in ("clean", "degraded")}
+            return {name: handle.get_tensor(name) for name in ("clean", "degraded")}
+
+    if feature_cache_mode() == "read-only":
+        try:
+            loaded = read_pair()
+        except FileNotFoundError:
+            loaded = {"clean": model.encode(reference), "degraded": model.encode(base)}
+    else:
+        cache.mkdir(parents=True, exist_ok=True)
+        with FileLock(str(cache / f"{key}.lock")):
+            if not path.exists():
+                features = {
+                    "clean": model.encode(reference).cpu().contiguous(),
+                    "degraded": model.encode(base).cpu().contiguous(),
+                }
+                atomic_write(path, save(features, metadata={"key": key}))
+            loaded = read_pair()
     width = model.model.config.text_config.hidden_size
     for name in ("clean", "degraded"):
         if loaded[name].shape != (h * w, width) or loaded[name].dtype != model.dtype:
