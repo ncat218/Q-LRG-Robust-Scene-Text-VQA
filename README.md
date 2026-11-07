@@ -9,7 +9,8 @@ S1 trains two global restorers and two adaptation controls in one allocation. Re
 The diagnostic set uses a fixed prefix of the TextOCR-covered images in a 90/10 image-level split of official train. The default 500 images form an initial precision and coverage check. Extend the prefix with the same seed when the paired intervals are too wide for the planned effect or the grounding cohort is too small.
 
 - [UIT-HPC runbook](docs/h200_runbook.md)
-- [D0 and S0 protocol](docs/research_blueprint.md)
+- [Research blueprint](docs/research_blueprint.md)
+- [Experiment registry](docs/experiment_registry.md)
 - [Implementation decisions](docs/decisions.md)
 - [Validation status](docs/implementation_review.md)
 

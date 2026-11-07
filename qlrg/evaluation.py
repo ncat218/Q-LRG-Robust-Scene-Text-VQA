@@ -76,7 +76,7 @@ def summarize(output, rows, manifest, stage, repeats, seed, grounding_policy=Non
             (qid, arms) for qid, arms in by_question.items()
             if cohort == "all" or "O3" in arms
         ]
-        for slice_name in ("all", "numeric_or_date", "small_ocr_text", "context_dependent"):
+        for slice_name in ("all", "numeric_or_date", "small_answer_text", "context_dependent"):
             if stage == "d0" and slice_name != "all":
                 continue
             pairs = []
@@ -85,8 +85,11 @@ def summarize(output, rows, manifest, stage, repeats, seed, grounding_policy=Non
                 tags = {
                     "all": True,
                     "numeric_or_date": bool(re.search(r"\d", refs.most_common(1)[0][0])),
-                    "small_ocr_text": arms[reference].get("small_ocr_text", False),
-                    "context_dependent": arms.get("O3", {}).get("context_dependent", False),
+                    "small_answer_text": cohort == "grounded" and arms["O3"].get("small_answer_text") is True,
+                    "context_dependent": (
+                        cohort == "grounded" and grounding_policy == "human_reviewed"
+                        and arms["O3"].get("context_dependent", False)
+                    ),
                 }
                 if tags[slice_name]:
                     pairs.append((arms[reference], arms[target]))
@@ -105,6 +108,7 @@ def summarize(output, rows, manifest, stage, repeats, seed, grounding_policy=Non
                 "fully_correct_to_lower": int(((a == 1) & (b < 1)).sum()),
                 "lower_to_fully_correct": int(((a < 1) & (b == 1)).sum()),
                 "score_improved": int((b > a).sum()), "score_worsened": int((b < a).sum()),
+                "mean_reference_mask_fraction": float(np.mean([row.get("mask_fraction", 0) for row in left])),
                 "mean_target_mask_fraction": float(np.mean([row.get("mask_fraction", 0) for row in right])),
             })
     if not summaries:
@@ -120,9 +124,59 @@ def summarize(output, rows, manifest, stage, repeats, seed, grounding_policy=Non
         "scorer_sha256": SCORER_SHA256, "cluster": "image_id",
         "repeats": repeats, "seed": seed, "comparisons": summaries,
         "slices": {
-            "numeric_or_date": "Most frequent raw answer contains a digit",
-            "small_ocr_text": "At least one OCR polygon is at most one merged cell high",
-            "context_dependent": "Flag supplied by the human grounding reviewer",
+            "numeric_or_date": "Digit-containing most frequent raw answer, a proxy for numeric/date questions",
+            "small_answer_text": "Grounded answers with a selected OCR polygon at most one merged cell high",
+            "context_dependent": "Grounded questions flagged by a human reviewer",
         },
     })
     return summaries
+
+
+def oracle_decision_memo(mode, grounded, questions, grounding_policy, comparisons):
+    """Separate evidence for localized substitution from the clean reference gap."""
+    by_key = {(r["cohort"], r["slice"], r["reference"], r["target"]): r for r in comparisons}
+    text_effect = by_key["all", "all", "O0", "O2"]
+    answer_vs_lr4 = by_key.get(("grounded", "all", "O0", "O3"))
+    answer_vs_random = by_key.get(("grounded", "all", "O4", "O3"))
+    text = [
+        "# S0 diagnostic memo", "",
+        f"Mode {mode}. Grounding usable for {grounded}/{questions} questions.",
+        f"Grounding policy: {grounding_policy}.",
+        "O0 (unaltered LR4 features), O1 (all clean features), O2 (clean features in TextOCR regions), "
+        "O3 (clean features in the annotated answer region), O4 (random region with the O3 token budget), "
+        "O5 (O3 with dilation).", "",
+        "## Localized interventions", "",
+    ]
+    if text_effect["ci_low_pp"] > 0:
+        text.append("- O2 improves over O0 on this diagnostic set. This measures the value of substituting known clean text features.")
+    else:
+        text.append("- O2 has no clear positive effect over O0. Check mask coverage, alignment and scoring.")
+    if answer_vs_lr4 is None or answer_vs_random is None:
+        text.append("- No usable paired answer-region contrast is available.")
+    elif min(answer_vs_lr4["ci_low_pp"], answer_vs_random["ci_low_pp"]) > 0:
+        text.append("- O3 improves over both O0 and its equal-token random control O4 on the grounded cohort.")
+    else:
+        text.append("- O3 does not show a clear positive effect over both O0 and O4 on the grounded cohort.")
+    if grounding_policy != "human_reviewed":
+        text.append("- Answer-region evidence is provisional. Review grounding and coverage before generalizing.")
+    text.extend([
+        "- O4 matches the O3 token budget. Comparisons with O2 or O5 may also reflect mask size.",
+        "- Slice estimates are exploratory. Check sample sizes and the direction of paired effects.", "",
+        "## Clean reference", "",
+        "O1 approximates native CLEAN after the identity gate. Its gap from O0 describes clean-versus-LR4 "
+        "headroom on the same cohort and does not drive the localized-intervention decision.",
+    ])
+    for cohort, arm in (("all", "O2"), ("grounded", "O3")):
+        clean = by_key.get((cohort, "all", "O0", "O1"))
+        localized = by_key.get((cohort, "all", "O0", arm))
+        if clean and localized and clean["delta_pp"] > 0:
+            recovered = 100 * localized["delta_pp"] / clean["delta_pp"]
+            text.append(f"- {arm} recovers {recovered:.1f}% of the O1–O0 gap on {cohort} questions (point estimate).")
+    text.extend(["", "## Paired 95% image-cluster intervals", ""])
+    text.extend(
+        f"- {r['target']} vs {r['reference']} ({r['cohort']}/{r['slice']}, "
+        f"{r['questions']} questions, {r['images']} images): "
+        f"{r['delta_pp']:+.2f} pp [{r['ci_low_pp']:+.2f}, {r['ci_high_pp']:+.2f}]"
+        for r in comparisons
+    )
+    return "\n".join(text) + "\n"

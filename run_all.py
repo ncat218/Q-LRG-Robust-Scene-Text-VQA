@@ -43,7 +43,7 @@ def write_script(run_dir, mode, commands):
     return script
 
 
-def write_job(run_dir, manifest, python, paths_config, mode, images, review):
+def write_job(run_dir, manifest, python, paths_config, mode, images, review, s0_config=None):
     python_cmd = [str(python), "-B", "-m", "qlrg.cli"]
     data_cmd = [*python_cmd, "--paths", paths_config]
     commands = [
@@ -57,6 +57,8 @@ def write_job(run_dir, manifest, python, paths_config, mode, images, review):
     s0_options = []
     if mode == "full":
         s0_options = ["--review", str(review)] if review else ["--provisional-grounding"]
+    if s0_config is not None:
+        s0_options.extend(("--config", str(s0_config)))
     for stage in ("d0", "s0"):
         stage_command = f'bash slurm/job.sh {stage} "$@"'
         if stage == "s0" and s0_options:
@@ -84,6 +86,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=("smoke", "full", "s1"), default="smoke")
     parser.add_argument("--from-run", type=Path, help="Completed full D0/S0 anchor for S1")
+    parser.add_argument("--s0-config", type=Path, help="S0 YAML for a diagnostic or mask sensitivity run")
     parser.add_argument("--s1-config", type=Path, help="S1 YAML configuration")
     parser.add_argument("--resume", type=Path, help="Resume an existing S1 run")
     parser.add_argument("--review", type=Path, help="Approved grounding JSONL for full S0")
@@ -91,6 +94,8 @@ def main():
     args = parser.parse_args()
     if args.review and (args.mode != "full" or not args.review.is_file()):
         parser.error("--review requires full mode and an existing JSONL")
+    if args.s0_config and (args.mode == "s1" or not args.s0_config.is_file()):
+        parser.error("--s0-config requires smoke/full mode and an existing YAML")
     if args.mode != "s1" and (args.from_run or args.s1_config or args.resume):
         parser.error("--from-run, --s1-config and --resume apply to S1")
     if args.mode == "s1":
@@ -127,8 +132,12 @@ def main():
         images = 500 if args.mode == "full" else 12
         run_dir = Path(tempfile.mkdtemp(prefix=f"{args.mode}{images}-{stamp}-", dir=runs))
         manifest = run_dir / "manifest.json"
+        config_path = None
+        if args.s0_config:
+            config_path = run_dir / "s0.yaml"
+            config_path.write_bytes(args.s0_config.read_bytes())
         script = write_job(run_dir, manifest, python, paths_config, args.mode, images,
-                           args.review.resolve() if args.review else None)
+                           args.review.resolve() if args.review else None, config_path)
         submit.extend(("--manifest", str(manifest)))
     submit.extend(("--run-dir", str(run_dir)))
     if args.mode == "full":

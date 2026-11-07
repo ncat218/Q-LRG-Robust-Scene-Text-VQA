@@ -55,6 +55,19 @@ cat runs/diag500-v1/s0/decision.md
 
 Slurm stdout and stderr go under the run's `logs/` directory with the job ID. Use the same manifest, options and run directory to resume. A changed experiment gets a new directory. S0 writes scored predictions, the paired summaries, coverage, PNG overlays and a decision memo. Set `QLRG_FEATURE_CACHE` to a dedicated writable cache directory to reuse validated feature pairs across compatible runs.
 
+## Planned S0 mask sensitivity run
+
+Use the same checkout, fixed seed, paths, manifest and grounding choices for both arms of the sensitivity check. If using reviewed grounding, pass the same `--review` JSONL to both commands. Generate the scripts with `--dry-run` first.
+
+```bash
+mkdir -p local
+sed 's/^mask_rule: overlap$/mask_rule: center/' configs/s0_oracle.yaml > local/s0-center.yaml
+python3 run_all.py --mode full --s0-config configs/s0_oracle.yaml --dry-run
+python3 run_all.py --mode full --s0-config local/s0-center.yaml --dry-run
+```
+
+For the scheduled comparison, run the two commands without `--dry-run` from the same checkout. Each launch snapshots the supplied YAML in its run directory. Verify both manifests have the same SHA-256 before joining predictions. Compare per-question scores and token counts for O2 (all TextOCR) across the two rules, with a paired image-cluster interval. For O3 (annotated answer region), report accuracy on the intersection of nonempty masks and report each rule's coverage separately. Inspect small answer words and cases where the token-center rule drops the mask.
+
 ## S1 pilot from a verified D0/S0 run
 
 From the existing checkout on the UIT-HPC login node, update the code and submit one job.

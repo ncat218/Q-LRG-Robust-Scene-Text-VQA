@@ -13,6 +13,7 @@ import torch
 
 from .common import atomic_write, object_hash, write_json
 from .data import rank
+from .evaluation import oracle_decision_memo
 from .feature_injection import replace_region
 from .grid_alignment import dilate, image_grid, project, random_region
 from .qwen_wrapper import assert_aligned
@@ -89,10 +90,11 @@ def oracle_image(model, image, root, output, config, mode, review, shared):
     all_text = project(image["words"], clean.size, grid, rule, threshold)
     other_rule = "center" if rule == "overlap" else "overlap"
     alternative_text = project(image["words"], clean.size, grid, other_rule, threshold)
-    small_text = any(
-        max(y for _, y in w["polygon"]) - min(y for _, y in w["polygon"]) <= clean.height / grid[0]
-        for w in image["words"]
-    )
+    small_word_ids = {
+        word["id"] for word in image["words"]
+        if max(y for _, y in word["polygon"]) - min(y for _, y in word["polygon"]) <= clean.height / grid[0]
+    }
+    small_word_fraction = len(small_word_ids) / len(image["words"])
     rows, coverage = [], []
     for q in image["questions"]:
         qid = q["question_id"]
@@ -105,9 +107,11 @@ def oracle_image(model, image, root, output, config, mode, review, shared):
             ("O1", clean_features, 1.0),
             ("O2", replace_region(degraded_features, clean_features, all_text), float(all_text.mean())),
         ]
+        small_answer_text = None
         record = {
             "question_id": qid, "image_id": image["image_id"], "grounding": status,
-            "literal_candidate": bool(q["candidate"]), "small_ocr_text": small_text,
+            "literal_candidate": bool(q["candidate"]), "small_ocr_text": bool(small_word_ids),
+            "small_ocr_word_fraction": small_word_fraction,
             "text_mask_tokens": int(all_text.sum()),
             "alternative_text_mask_tokens": int(alternative_text.sum()),
             "grid_tokens": all_text.size,
@@ -118,6 +122,8 @@ def oracle_image(model, image, root, output, config, mode, review, shared):
             if not answer_mask.any():
                 record["grounding"] = "empty_projected_answer_mask"
             else:
+                small_answer_text = bool(small_word_ids.intersection(word_ids))
+                record["small_answer_text"] = small_answer_text
                 matched, random_mode = random_region(answer_mask, int(rank(config["random_seed"], qid)[:16], 16))
                 expanded = dilate(answer_mask, config["dilation_radius"])
                 masks = {"O3": answer_mask, "O4": matched, "O5": expanded}
@@ -135,7 +141,8 @@ def oracle_image(model, image, root, output, config, mode, review, shared):
         for arm, features, area in arms:
             rows.append({
                 "question_id": qid, "image_id": image["image_id"], "arm": arm,
-                "grid_thw": grid_thw, "mask_fraction": area, "small_ocr_text": small_text,
+                "grid_thw": grid_thw, "mask_fraction": area, "small_ocr_text": bool(small_word_ids),
+                "small_answer_text": small_answer_text,
                 "context_dependent": context, **model.generate(batch, features),
             })
     return {"rows": rows, "coverage": coverage}
@@ -153,7 +160,11 @@ def oracle_report(output, manifest, mode, config, details, comparisons, groundin
         "grounded_images": len({row["image_id"] for row in grounded}),
         "grounded_fraction": len(grounded) / len(details),
         "random_mode": dict(Counter(row["random_mode"] for row in grounded)),
-        "selection_bias": "Grounded cohort favors unique OCR matches and high annotator agreement.",
+        "random_with_answer_overlap": sum(row["o3_o4_shared_tokens"] > 0 for row in grounded),
+        "selection_bias": (
+            "Candidate packs favor unique literal OCR matches with high annotator agreement; "
+            "multi-word and context-dependent answers may be underrepresented."
+        ),
         "records": details,
     })
     ranked = sorted(grounded, key=lambda row: rank(config["random_seed"], row["question_id"]))
@@ -162,30 +173,5 @@ def oracle_report(output, manifest, mode, config, details, comparisons, groundin
         for arm in ("O2", "O3", "O4", "O5"):
             source = output / "overlay_candidates" / f"{prefix}-{arm}.png"
             atomic_write(output / "overlays" / f"{row['question_id']}-{arm}.png", source.read_bytes())
-    effects = [
-        f"- {r['target']} vs {r['reference']} ({r['cohort']}, {r['questions']} questions, "
-        f"{r['images']} images): {r['delta_pp']:+.2f} pp "
-        f"[{r['ci_low_pp']:+.2f}, {r['ci_high_pp']:+.2f}]"
-        for r in comparisons if r["slice"] == "all"
-    ]
-    clean_effect = next(
-        row for row in comparisons if (row["cohort"], row["slice"], row["target"]) == ("all", "all", "O1")
-    )
-    if clean_effect["ci_low_pp"] > 0:
-        recommendation = "O1 shows positive clean-feature headroom. Inspect O2–O5 before selecting an S1 design."
-    elif clean_effect["ci_high_pp"] <= 0:
-        recommendation = "Inspect preprocessing and alignment before investing in S1."
-    else:
-        recommendation = "The O1 interval spans zero. Extend the diagnostic prefix if greater precision is needed."
-    text = [
-        "# S0 diagnostic memo", "",
-        f"Mode {mode}. Grounding usable for {len(grounded)}/{len(details)} questions.",
-        f"Grounding policy: {grounding_policy}.",
-        *(["O3-O5 use provisional OCR matches pending human review."]
-          if grounding_policy in {"provisional_ocr_150", "smoke_ocr"} else []), "",
-        "Paired 95% image-cluster intervals", "", *effects, "",
-        "Inspect the alignment gate, mask overlays and coverage before interpreting these effects.",
-        "Treat O1 as a clean-feature reference and O2–O5 as label-assisted diagnostic interventions.",
-        recommendation,
-    ]
-    atomic_write(output / "decision.md", ("\n".join(text) + "\n").encode())
+    memo = oracle_decision_memo(mode, len(grounded), len(details), grounding_policy, comparisons)
+    atomic_write(output / "decision.md", memo.encode("utf-8"))
