@@ -149,6 +149,8 @@ The feature cache stores both CLEAN and LR4 tensors. At full scale it may requir
 
 If the feature cache exceeds quota, point `QLRG_FEATURE_CACHE` to a writable location with sufficient confirmed quota before resubmitting. A dedicated inactive feature cache can be removed and rebuilt. Keep the audit's `audit/` and `datasets/` directories and the interrupted run's S1 state and checkpoints for resume. The audit `review.tar.gz` is a downloadable copy and can be removed after verifying the original artifacts or an external copy.
 
+To estimate remaining writes against a known quota budget, run `"${QLRG_ENV:-$PWD/.venv}/bin/python" -B -m scripts.check_s1_cache --run "$run" --budget-gb 30` from the repository. It counts matching feature keys for the original manifests and estimates the bytes for missing entries. Use the actual quota headroom for the budget. The check reserves 3 GiB for other artifacts and exits nonzero when the estimate exceeds the budget.
+
 Once hyperparameters and checkpoints are locked, official validation is a separate evaluation job.
 
 ```bash
