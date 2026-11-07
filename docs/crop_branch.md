@@ -49,6 +49,8 @@ Launcher submit ngay. SD-RPN ghi tọa độ và kết quả trong `runs/sdrpn-c
 "$main/.venv/bin/python" -B -c 'from scripts.query_crop import selector_snapshot; print(selector_snapshot("local/selector-cache"))'
 ```
 
+Launcher kiểm tra import `pyexpat` và phiên bản Transformers của SD-RPN trước khi submit. Nếu Python Conda báo thiếu symbol Expat, thêm `--sdrpn-libexpat /path/to/miniconda3/lib/libexpat.so.1`. Thư viện này chỉ được nạp trong tiến trình SD-RPN.
+
 Khi cần tiếp tục một lượt bị ngắt, chạy `python3 run_query_crop.py --resume /absolute/path/to/run --time 06:00:00` từ checkout ban đầu. Worker tái sử dụng các shard đã ghi xong theo ảnh.
 
 Kết quả gồm `summary.json` (điểm, CI ghép cặp theo ảnh, số token, thời gian và số vùng trùng nhau), `predictions.jsonl` (tọa độ, điểm và câu trả lời), `review.html` (lọc tăng/giảm và tìm theo mã câu) cùng thư mục ảnh `review-images/`. Giữ HTML và thư mục ảnh cạnh nhau khi tải về.

@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -10,9 +11,17 @@ from PIL import Image
 
 from qlrg.case_review import write_case_review
 from scripts.query_crop import LABELS, candidate_boxes, donor_questions, predict_image, summarize
+from scripts.sdrpn_runtime import selector_environment
 
 
 class QueryCropTest(unittest.TestCase):
+    def test_expat_preload_is_scoped_to_selector_child(self):
+        with patch.dict(os.environ, {"LD_PRELOAD": "/old.so", "PYTHONPATH": "/wrong"}):
+            env = selector_environment({"sdrpn_libexpat": "/conda/lib/libexpat.so.1"})
+            self.assertEqual(env["LD_PRELOAD"], "/conda/lib/libexpat.so.1:/old.so")
+            self.assertNotIn("PYTHONPATH", env)
+            self.assertEqual(os.environ["LD_PRELOAD"], "/old.so")
+
     def test_sdrpn_box_and_missing_region_use_the_same_lr4(self):
         lr4 = Image.new("RGB", (80, 40), "white")
         image = {"image_id": "one", "questions": [

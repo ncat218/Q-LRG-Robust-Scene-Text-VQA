@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from run_all import REPO, WITH_SLURM, write_script
+from scripts.sdrpn_runtime import selector_environment
 
 
 def main():
@@ -22,6 +23,7 @@ def main():
     parser.add_argument("--sdrpn-env", type=Path, help="Existing SD-RPN environment with Transformers 4.51.3")
     parser.add_argument("--sdrpn-vendor", type=Path, help="Directory containing qwen_src")
     parser.add_argument("--sdrpn-checkpoint", type=Path, help="Local SD-RPN Qwen2.5-VL-3B snapshot")
+    parser.add_argument("--sdrpn-libexpat", type=Path, help="Compatible libexpat.so.1, preloaded only for SD-RPN")
     parser.add_argument("--selector-cache", type=Path)
     parser.add_argument("--s1-run", type=Path)
     parser.add_argument("--arm", choices=("S1a", "S1b"))
@@ -45,7 +47,7 @@ def main():
 
     sdrpn_options = ("sdrpn_env", "sdrpn_vendor", "sdrpn_checkpoint")
     settings = ("data_dir", "env", "paths", "selector", "selector_cache", "s1_run", "arm", "split",
-                "images", "crop_fraction", "zoom", "seed", *sdrpn_options)
+                "images", "crop_fraction", "zoom", "seed", "sdrpn_libexpat", *sdrpn_options)
     if args.resume is not None:
         if any(getattr(args, name) is not None for name in settings):
             parser.error("--resume reuses the original settings. Only --time and --dry-run may be overridden.")
@@ -70,7 +72,7 @@ def main():
                 parser.error("SD-RPN requires --sdrpn-env, --sdrpn-vendor and --sdrpn-checkpoint")
             if args.crop_fraction is not None or args.selector_cache is not None:
                 parser.error("--crop-fraction and --selector-cache apply to --selector clip")
-        elif any(path is not None for path in sdrpn_paths.values()):
+        elif args.sdrpn_libexpat is not None or any(path is not None for path in sdrpn_paths.values()):
             parser.error("SD-RPN paths apply to --selector sdrpn")
         fraction = args.crop_fraction if args.crop_fraction is not None else 0.6
         zoom = args.zoom if args.zoom is not None else 1.5
@@ -91,6 +93,11 @@ def main():
         }
         if selector == "sdrpn":
             launch.update({key: str(path.expanduser().resolve()) for key, path in sdrpn_paths.items()})
+            if args.sdrpn_libexpat is not None:
+                libexpat = str(args.sdrpn_libexpat.expanduser().resolve())
+                if (":" in libexpat and os.name != "nt") or any(char.isspace() for char in libexpat):
+                    parser.error("--sdrpn-libexpat must be a path usable by the Linux dynamic loader")
+                launch["sdrpn_libexpat"] = libexpat
     python = Path(launch["env"]) / "bin/python"
     required = [python, Path(launch["paths"]), Path(launch["data_dir"]) / "COMPLETE.json",
                 Path(launch["data_dir"]) / f"{launch['split']}.json"]
@@ -103,9 +110,20 @@ def main():
             Path(launch["sdrpn_checkpoint"]) / "config.json",
             Path(launch["sdrpn_checkpoint"]) / "model.safetensors.index.json",
         ))
+        if launch.get("sdrpn_libexpat"):
+            required.append(Path(launch["sdrpn_libexpat"]))
     for path in required:
         if not path.is_file():
             parser.error(f"Required file not found: {path}")
+
+    if launch.get("selector") == "sdrpn" and not args.dry_run:
+        subprocess.run([
+            str(Path(launch["sdrpn_env"]) / "bin" / "python"), "-B", "-c",
+            'import pyexpat, importlib.metadata; '
+            'version = importlib.metadata.version("transformers"); '
+            'assert version == "4.51.3", f"Expected Transformers 4.51.3, got {version}"; '
+            'print(f"SD-RPN import preflight passed: {pyexpat.EXPAT_VERSION}, Transformers {version}")',
+        ], cwd=REPO, env=selector_environment(launch), check=True)
 
     if args.resume is None:
         runs = REPO / "runs"

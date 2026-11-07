@@ -1,10 +1,10 @@
 """Prepare the SD-RPN selector process without changing the Q-LRG environment."""
 
-import os
 import subprocess
 from pathlib import Path
 
 from qlrg.common import read_json, sha256, write_json
+from scripts.sdrpn_runtime import selector_environment
 
 
 def selector_provenance(settings, repo):
@@ -27,6 +27,8 @@ def selector_provenance(settings, repo):
         "source_sha256": {p.relative_to(vendor).as_posix(): sha256(p) for p in sorted((vendor / "qwen_src").rglob("*.py"))},
         "backend_sha256": sha256(Path(__file__)),
         "worker_sha256": sha256(repo / "scripts" / "sdrpn_select.py"),
+        "runtime_sha256": sha256(repo / "scripts" / "sdrpn_runtime.py"),
+        "libexpat_sha256": sha256(settings["sdrpn_libexpat"]) if settings.get("sdrpn_libexpat") else None,
     }
 
 
@@ -45,7 +47,7 @@ def run_selector(settings, repo, output, paths, config, selected, donors):
     snapshot = paths["hf_hub"] / ("models--" + config["id"].replace("/", "--")) / "snapshots" / config["revision"]
     proposals = output / "sdrpn-proposals"
     cache = output / ".sdrpn-runtime-cache"
-    env = {key: value for key, value in os.environ.items() if key not in ("PYTHONPATH", "PYTHONHOME", "VIRTUAL_ENV")}
+    env = selector_environment(settings)
     env.update({
         "HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1", "HF_HOME": str(cache / "hf"),
         "HF_HUB_CACHE": str(cache / "hf" / "hub"), "XDG_CACHE_HOME": str(cache), "MPLCONFIGDIR": str(cache / "mpl"),
