@@ -66,6 +66,12 @@ if(D.heatmaps){
   el('has-visual').textContent='Có heatmap';
   el('visual-explainer').textContent='Ô cam đậm hơn khi feature của token thay đổi nhiều hơn. Màu được chuẩn hóa riêng theo từng ảnh và từng nhánh. Đây là ảnh đầu vào có phủ heatmap; mô hình nhận các vector feature.';
 }
+if(D.cropPreviews){
+  el('run-summary').textContent=D.images+' ảnh · '+D.rows.length+' câu hỏi · '+D.predictionCount+' dự đoán';
+  el('visual-heading').textContent='Ảnh và vùng crop';
+  el('has-visual').textContent='Có ảnh xem trước';
+  el('visual-explainer').textContent='Ảnh LR4 và khung vùng được chọn, kèm ảnh crop đã zoom ở bên phải. Nhánh phục hồi nhận cùng ảnh đầu vào và chỉnh feature trước LLM.';
+}
 if(D.groundingPolicy){
   el('grounding-note').hidden=false;
   const notes={provisional_ocr_150:'Vùng đáp án lấy từ khớp OCR theo nhãn, chưa duyệt tay.',smoke_ocr:'Vùng đáp án lấy từ khớp OCR trong lượt smoke.',human_reviewed:'Vùng đáp án lấy từ nhãn đã duyệt.'};
@@ -73,7 +79,10 @@ if(D.groundingPolicy){
 }
 for(const id of ['reference','target']) for(const [k,v] of Object.entries(names)) el(id).add(new Option(k+' ('+v+')',k));
 el('reference').value=D.defaults[0]; el('target').value=D.defaults[1];
-function visual(r,arm){return D.overlays[(D.heatmaps?r.img:r.id)+'-'+arm];}
+function visual(r,arm){
+  if(D.cropPreviews)return D.cropPreviews[r.id+'-'+arm];
+  return D.overlays[(D.heatmaps?r.img:r.id)+'-'+arm];
+}
 function hasImage(r,a,b){return !!(visual(r,a)||visual(r,b));}
 function showCase(r,a,b){
   el('panels').replaceChildren();
@@ -92,7 +101,11 @@ function showCase(r,a,b){
     const imgData=visual(r,arm);
     if(imgData){
       const img=document.createElement('img');img.alt=(D.heatmaps?'Ảnh đầu vào và độ lớn thay đổi feature ở ':'Ảnh Bicubic đánh dấu token thay ở ')+arm;
-      img.src='data:image/png;base64,'+imgData;f.append(img);
+      if(D.cropPreviews){
+        img.alt='Ảnh LR4 và vùng được chọn ở '+arm;
+        img.src=imgData;
+      }else img.src='data:image/png;base64,'+imgData;
+      f.append(img);
     }else{
       const hint=document.createElement('p');hint.className='muted note';
       hint.textContent=D.heatmaps?'Câu này chưa có heatmap đã lưu cho nhánh đã chọn.':'Gói kết quả không có ảnh mask của nhánh này cho câu đã chọn.';f.append(hint);

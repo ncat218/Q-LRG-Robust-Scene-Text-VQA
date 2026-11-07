@@ -21,7 +21,7 @@ S0_LABELS = {
 
 
 def write_case_review(path, predictions, labels, *, title, manifest=None, overlays_dir=None,
-                      grounding_policy=None, repeats=10000, seed=42, image_overlays=None):
+                      grounding_policy=None, repeats=10000, seed=42, image_overlays=None, crop_previews=None):
     """Render scored rows grouped by question; optional masks are named QUESTION-ARM.png."""
     rows = {}
     for p in predictions:
@@ -90,11 +90,15 @@ def write_case_review(path, predictions, labels, *, title, manifest=None, overla
         defaults = ["O0", "O2"]
     if "A0:S1b" in pairs:
         defaults = ["A0", "S1b"]
+    if crop_previews is not None and "full:query" in pairs:
+        defaults = ["full", "query"]
     data = {
         "title": title, "labels": active, "defaults": defaults, "rows": list(rows.values()),
         "images": len({r["img"] for r in rows.values()}), "predictionCount": len(predictions),
         "groundingPolicy": grounding_policy, "pairs": pairs, "overlays": overlays, "heatmaps": image_overlays is not None,
     }
+    if crop_previews is not None:
+        data["cropPreviews"] = crop_previews
     template = Path(__file__).with_name("case_review.html").read_text(encoding="utf-8")
     payload = json.dumps(data, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
     # Data is parsed from a JSON script element. Prevent prediction text from closing it.

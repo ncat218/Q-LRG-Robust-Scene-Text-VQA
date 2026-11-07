@@ -13,7 +13,8 @@ Completed rows reference immutable run directories on UIT-HPC. The job number an
 | S1 text-weighted feature loss | Planned after audit and cost review | Same S1b architecture, data and budget, change feature-loss weights only. | Text/background MSE and cosine, label coverage, soft accuracy and regressions. |
 | D0 expanded parity | Planned | Cover EXIF orientation and grid-size extremes explicitly. | Log which stress cases were available and tested. |
 | S2 and S3 | Deferred pending expanded S1 versus adaptation controls | Evaluate textness and question guidance with S1b and adaptation controls. | Record localization and answer-level effects separately. |
-| Branch X, crop oracle | Pilot C0/C1/Random prepared on crop-branch | Matched LR4 questions with S0 grounding. C2–C4 depend on the oracle comparison. | Paired accuracy intervals, crop coverage, visual token counts and optional LR4 detector recall. [Protocol](crop_branch.md) |
+| Branch X, crop oracle | Job 11223 submitted as a diagnostic | Matched LR4 questions with S0 answer grounding. | Optional oracle reference. Exclude from evaluation of question-selected crop. [Protocol](crop_branch.md) |
+| Branch X, query-selected crop | Launcher prepared on crop-branch | Frozen CLIP on LR4 windows with real and shuffled questions. Compare full and cropped inputs, each with the same S1 checkpoint when available. Develop on val_inner, report locked settings on official_val. | Paired accuracy intervals, visual tokens, selection/inference time and crop previews. [Protocol](crop_branch.md) |
 
 ## Interpretation notes
 
