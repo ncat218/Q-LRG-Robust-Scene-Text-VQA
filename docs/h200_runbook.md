@@ -98,6 +98,8 @@ python3 run_all.py --mode s1 --resume "$run"
 ```
 ## Expanded S1 and A0 audit
 
+Apply the [predeclared audit decision rules](audit_decision_rules.md) before choosing the next allocation.
+
 All comparisons use the project's own frozen Qwen control. Train on train_inner, select hyperparameters on val_inner, and report the locked models on labeled official validation. The official test set is optional final submission only. Keep validation labels out of training. The first S1 pilot already selected training images without TextOCR. Its 500-image evaluation anchor and the old common preflight depended on TextOCR.
 
 The next job repeats both native A0 and cached-injection A0 twice over the full 500-image anchor. It compares token IDs and scores within each path and between paths. Native versus injected mismatches trigger fresh-feature and prefill-logit diagnostics. These are two full passes inside one job. Cross-job variability requires a second audit job with the same settings.

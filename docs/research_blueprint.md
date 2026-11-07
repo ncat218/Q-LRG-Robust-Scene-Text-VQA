@@ -29,12 +29,14 @@ Intervene on Qwen2.5-VL-3B's merged visual tokens after token order has been res
 
 O1 approximates the native CLEAN arm. Its comparison with O0 describes clean-versus-LR4 headroom. Identity checks verify the intended equivalence on sampled grids, while archived predictions can differ slightly in aggregate. Use the within-cohort gap to contextualize localized recovery. Do not use the clean gap alone to decide whether a localized intervention worked.
 
-- On all questions, O2 versus O0 measures the effect of substituting text-region features. A separate control matched to O2's token budget is optional.
+- On all questions, O2 versus O0 measures the effect of substituting text-region features. The next diagnostic adds a random control matched to O2's token budget, with multiple fixed mask seeds.
 - On the same grounded questions, O3 versus O0 measures the benefit of answer-region substitution. O3 versus O4 controls token count. O4 matches O3, so an O2 versus O4 comparison also changes the amount of feature replacement. Record mask fractions and overlap with the answer mask.
 - Use O3 versus O2 to compare answer-region and all-text coverage, and O5 versus O3 to test dilation. Both contrasts can change the token budget. Evaluate masks, paired confidence intervals and representative failures before drawing conclusions.
 - Automatic grounding favors a unique exact OCR match with at least six agreeing answers. The provisional run selects at most one question per image and 150 images. It may miss multi-word answers, multiple matching regions, and context-dependent questions. Hand review can add valid multi-word spans and label context requirements. Record reviewed, rejected, ungroundable, empty-mask and unreviewed cases. Keep all oracle annotation and CLEAN substitutions in diagnostic evaluation.
 - Digit-containing consensus answers are a numeric/date proxy. For small-text questions, use OCR word height in the grounded answer region. Record the fraction of small OCR words separately as an image-level statistic. Analyze context dependence on human-labeled grounded cases.
 - Run overlap at 5% versus token-center selection on the same manifest and grounding file. Compare accuracy and mask size on matched questions. Report groundings lost by either mask rule separately. See the [runbook](h200_runbook.md).
+
+The [audit decision rules](audit_decision_rules.md) define the next gates, cohort-specific interpretation and the planned text-weighted S1 loss.
 
 ## S1 — Global latent restoration
 
