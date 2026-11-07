@@ -141,9 +141,13 @@ The generator prepares 1e-4, 2e-4 and 5e-4 with 4,000 training images and one ep
 
 After interruption, use `python3 run_all.py --mode s1 --resume "$run" --time 2-00:00:00` to continue from the last saved checkpoint in a large run.
 
+Expanded S1 saves once per 1,000 optimizer steps (4,000 questions at the default accumulation) and at the end of each arm. Each arm atomically replaces its single `checkpoint.pt`. Keep the configuration copied into the run directory when resuming, including the checkpoint interval of an older run.
+
 For a learning-rate sweep and repeated seeds, generate candidate JSON configs from `configs/s1_expanded.json` using `python3 scripts/prepare_s1_study.py --output local/s1-study`. The default grid is three seeds (42, 43, 44) and three learning rates (5e-5, 1e-4, 2e-4). This prepares nine candidate configurations. Schedule the budget after the A0 audit and data counts are reviewed. Give every arm the same candidate grid, data, example count and optimizer-step budget. Evaluate candidates on val_inner, record the selection rule, then use at least three distinct seeds for the selected regime. Record each seed separately before aggregating image-paired effects and seed variability. The expanded run reports A1clean and A2clean, which use the same question and answer schedule as the other arms but CLEAN inputs throughout.
 
-The feature cache stores both CLEAN and LR4 tensors. At full scale it may require hundreds of GB depending on token grids. The training preflight records a conservative storage bound and available space in `s1/storage.json`. Matching seeds and learning rates can share cached features under an unchanged code/model/preprocessing signature. Walltime estimates must account for initial cache construction and additional clean-only controls.
+The feature cache stores both CLEAN and LR4 tensors. At full scale it may require hundreds of GB depending on token grids. The training preflight records a conservative storage bound and filesystem-wide free space in `s1/storage.json`. Check the user or project quota on the chosen mount separately. Matching seeds and learning rates can share cached features under an unchanged code/model/preprocessing signature. Walltime estimates must account for initial cache construction and additional clean-only controls.
+
+If the feature cache exceeds quota, point `QLRG_FEATURE_CACHE` to a writable location with sufficient confirmed quota before resubmitting. A dedicated inactive feature cache can be removed and rebuilt. Keep the audit's `audit/` and `datasets/` directories and the interrupted run's S1 state and checkpoints for resume. The audit `review.tar.gz` is a downloadable copy and can be removed after verifying the original artifacts or an external copy.
 
 Once hyperparameters and checkpoints are locked, official validation is a separate evaluation job.
 

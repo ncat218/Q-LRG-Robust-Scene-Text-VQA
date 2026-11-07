@@ -3,7 +3,7 @@
   "train_images": "all",
   "epochs": 2,
   "accumulate": 4,
-  "checkpoint_every": 250,
+  "checkpoint_every": 1000,
   "clean_fraction": 0.4,
   "learning_rate": 0.0002,
   "weight_decay": 0.01,
