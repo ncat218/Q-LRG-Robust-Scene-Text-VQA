@@ -12,6 +12,7 @@ Completed rows reference immutable run directories on UIT-HPC. The job number an
 | S1 text-weighted feature loss | Planned after audit and cost review | Same S1b architecture, data and budget, change feature-loss weights only. | Text/background MSE and cosine, label coverage, soft accuracy and regressions. |
 | D0 expanded parity | Planned | Cover EXIF orientation and grid-size extremes explicitly. | Log which stress cases were available and tested. |
 | S2 and S3 | Deferred pending expanded S1 versus adaptation controls | Evaluate textness and question guidance with S1b and adaptation controls. | Record localization and answer-level effects separately. |
+| Query-selected crop restoration | Planned after A0 audit and a verified S1 reference | Compare full and query-selected crop with and without latent restoration, plus full scene with the same restored crop. | Paired LR4 accuracy, detection coverage, context-sensitive failures, resize, token budget and latency. [Protocol](research_blueprint.md#query-selected-crop-restoration) |
 
 ## Interpretation notes
 

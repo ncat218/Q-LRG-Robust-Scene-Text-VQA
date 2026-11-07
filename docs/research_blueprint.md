@@ -6,8 +6,9 @@ This is the repository's implementation specification. It consolidates section 1
 
 1. Can learned latent restoration improve degraded TextVQA against a frozen Bicubic control and adaptation baselines trained on the same data?
 2. Does modifying features in text regions improve on global restoration? Does conditioning the region on the question improve on textness alone?
+3. How does restoring a query-selected crop compare with restoring the full image, and what does adding the full scene contribute?
 
-Intervene on Qwen2.5-VL-3B's merged visual tokens after token order has been restored. Preserve the visual grid, token count and position IDs. Report clean performance and question-level regressions alongside LR4 gains. A soft gate on a dense grid carries the same token count into the language model. Measure latency independently.
+Intervene on Qwen2.5-VL-3B's merged visual tokens after token order has been restored. Preserve the visual grid, token count and position IDs of each encoded input during restoration. Report clean performance and question-level regressions alongside LR4 gains. A soft gate on a dense grid carries the same token count into the language model. Measure latency independently.
 
 ## Data and D0
 
@@ -51,6 +52,23 @@ Expanded S1 and A0 repeatability have priority. Under the current protocol, adva
 - **S2, textness.** Learn a soft gate over visual tokens with TextOCR masks on train_inner. Mask out textness supervision on examples without usable labels. Compare with S1b, ungated restoration and the adaptation controls. Report text and background token changes, localization quality and answer-level effects. Ground-truth boxes can serve as a separate oracle.
 - **S3, question relevance.** Use the question and degraded image features to predict a relevance gate over the grid. Answer-region supervision may use trusted annotations in training. At evaluation, use the model's own predictions for the gate. Compare against S2, a question-shuffled gate and equal-budget controls. Measure localization on a held-out grounded sample, with coverage and context-dependent errors.
 - Proceed to pre-merger high-resolution restoration (Phase B) if failures concentrate at small text that is unresolved after merging. Consider frequency-decomposed restoration (Phase C) if feature diagnostics motivate it. Both are conditional research extensions.
+
+## Query-selected crop restoration
+
+Run this branch after the A0 audit with a verified S1 restorer and full-image reference. It sits alongside the S2/S3 experiments that apply gates in place on the full image grid.
+
+Use the group's detector to propose text regions on the degraded image. Rank candidates by comparing question embeddings with features of the candidate regions. Select the crop and its padding using a rule tuned on val_inner. Crop the degraded pixels, encode the crop with Qwen's vision encoder, and apply the restorer after the Merger on the crop's own grid. Keep detector and ranking inputs restricted to the degraded image and question. Use the corresponding full-image arm when no usable crop is found. Record crop coordinates, detection misses and fallback reasons.
+
+Use the same question IDs, model, scoring, and restorer checkpoint in the first comparison. Reuse the selected crop between its two arms.
+
+| Input | Qwen features as encoded | Features after latent restoration |
+| --- | --- | --- |
+| Full image | Full-image reference | S1 full-image restorer |
+| Query-selected crop | Crop reference | Crop restorer |
+
+Compare within each row to measure the effect of restoration. Compare between rows to measure the net effect of the two input pipelines. Add a context arm that gives the LLM the original full image and the same restored crop. Its comparison with crop alone measures the benefit of adding the scene at the additional token cost. Record crop area, effective resize, visual token count and latency. To attribute a gain specifically to scene context, also compare inputs at matched text scale and visual token budget.
+
+When including the group's text tokens, hold their content and placement constant across the main arms. To study the contribution of each evidence source separately, compare image-only, text-token-only and combined inputs on the same questions. Report paired intervals on all evaluation questions with fallback, plus a slice with usable crops. Inspect both questions that benefit from zooming in and questions that need spatial or object context.
 
 ## Reporting
 
