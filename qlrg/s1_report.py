@@ -22,6 +22,10 @@ LABELS = {
     "A1": "visual adapter theo từng token, học từ đáp án",
     "A2": "LoRA trên mô hình ngôn ngữ, học từ đáp án",
 }
+EXTRA_LABELS = {
+    "A1clean": "visual adapter chỉ học trên ảnh sạch",
+    "A2clean": "LoRA chỉ học trên ảnh sạch",
+}
 PAIRS = [("A0", arm) for arm in LABELS if arm != "A0"] + [
     (arm, "S1b") for arm in ("S1a", "A1", "A2")
 ]
@@ -50,6 +54,9 @@ def write_visuals(stage, condition, image_id, image, delta, grid):
 
 
 def write_report(output, manifest, rows, stats, examples, config):
+    labels = {**LABELS, **{k: v for k, v in EXTRA_LABELS.items() if any(r["arm"] == k for r in rows)}}
+    pairs_to_report = [*PAIRS, *[("A0", arm) for arm in EXTRA_LABELS if arm in labels],
+                       *[(arm, "S1b") for arm in EXTRA_LABELS if arm in labels]]
     numeric = {
         q["question_id"] for image in manifest["images"] for q in image["questions"]
         if re.search(r"\d", Counter(q["answers"]).most_common(1)[0][0])
@@ -57,7 +64,7 @@ def write_report(output, manifest, rows, stats, examples, config):
     comparisons, accuracies, feature_regressions = [], [], []
     for condition in CONDITIONS:
         subset = [r for r in rows if r["condition"] == condition]
-        arms = {arm: [r for r in subset if r["arm"] == arm] for arm in LABELS}
+        arms = {arm: [r for r in subset if r["arm"] == arm] for arm in labels}
         for arm, predictions in arms.items():
             images = {r["image_id"]: r for r in predictions}
             accuracies.append({
@@ -74,7 +81,7 @@ def write_report(output, manifest, rows, stats, examples, config):
                 "mean_feature_mse_to_clean": mean(r["feature_mse_to_clean"] for r in images.values()),
                 "mean_feature_cosine_to_clean": mean(r["feature_cosine_to_clean"] for r in images.values()),
             })
-        for left, right in PAIRS:
+        for left, right in pairs_to_report:
             reference, target = arms[left], arms[right]
             pairs = list(zip(reference, target, strict=True))
             if any((a["image_id"], a["question_id"]) != (b["image_id"], b["question_id"]) for a, b in pairs):
@@ -106,9 +113,9 @@ def write_report(output, manifest, rows, stats, examples, config):
                 })
         write_case_review(
             output / ("review.html" if condition == "LR4" else "review-clean.html"),
-            subset, LABELS, title=f"S1 · {condition} · {output.parent.name}", manifest=manifest,
+            subset, labels, title=f"S1 · {condition} · {output.parent.name}", manifest=manifest,
             repeats=config["bootstrap_resamples"], seed=config["seed"],
-            image_overlays=(p for arm in LABELS for p in
+            image_overlays=(p for arm in labels for p in
                             (output / "variants" / arm / "heatmaps" / condition).glob("*.png")),
         )
     table = io.StringIO()
@@ -119,9 +126,10 @@ def write_report(output, manifest, rows, stats, examples, config):
     write_json(output / "summary.json", {
         "metric": "TextVQA MMF soft accuracy", "scorer_revision": SCORER_REVISION, "scorer_sha256": SCORER_SHA256,
         "bootstrap_cluster": "image_id", "bootstrap_resamples": config["bootstrap_resamples"],
-        "arm_labels": LABELS, "comparisons": comparisons, "accuracies": accuracies, "runtime": stats,
+        "arm_labels": labels, "comparisons": comparisons, "accuracies": accuracies, "runtime": stats,
         "training_questions_by_condition": dict(Counter(e[2] for e in examples)),
     })
+    write_interactions(output, rows, pairs_to_report, config)
     history = io.StringIO()
     writer = csv.DictWriter(history, fieldnames=["arm", "step", "examples", "loss", "grad_norm", "seconds"],
                             extrasaction="ignore")
@@ -132,3 +140,34 @@ def write_report(output, manifest, rows, stats, examples, config):
     atomic_write(output / "training_history.csv", history.getvalue().encode("utf-8"))
     write_jsonl(output / "predictions.jsonl", rows)
     write_json(output / "feature_regressions.json", feature_regressions)
+
+
+
+def degradation_interactions(rows, pairs, repeats, seed):
+    indexed = {}
+    for row in rows:
+        key = row["condition"], row["arm"], row["image_id"], row["question_id"]
+        if key in indexed:
+            raise ValueError(f"Duplicate degradation-interaction row: {key}")
+        indexed[key] = row["score"]
+    cases = sorted({(r["image_id"], r["question_id"]) for r in rows})
+    results = []
+    for reference, target in pairs:
+        deltas = []
+        for image_id, qid in cases:
+            scores = {(c, a): indexed[c, a, image_id, qid] for c in CONDITIONS for a in (reference, target)}
+            deltas.append((scores["LR4", target] - scores["LR4", reference]) -
+                          (scores["CLEAN", target] - scores["CLEAN", reference]))
+        results.append({"reference": reference, "target": target, "questions": len(cases),
+                        **paired_bootstrap(np.zeros(len(deltas)), deltas, [c[0] for c in cases], repeats, seed)})
+    return results
+
+
+def write_interactions(output, rows, pairs, config):
+    values = degradation_interactions(rows, pairs, config["bootstrap_resamples"], config["seed"])
+    write_json(output / "degradation_interaction.json", values)
+    table = io.StringIO()
+    writer = csv.DictWriter(table, fieldnames=list(values[0]))
+    writer.writeheader()
+    writer.writerows(values)
+    atomic_write(output / "degradation_interaction.csv", table.getvalue().encode("utf-8"))

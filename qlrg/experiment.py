@@ -22,6 +22,11 @@ GROUNDED_ARMS = {"O3", "O4", "O5"}
 
 
 def validate_manifest(manifest):
+    if manifest.get("schema") == 2:
+        from .s1_manifests import validate_s1_manifest
+
+        validate_s1_manifest(manifest)
+        return
     if (
         manifest["schema"] != 1 or manifest["protocol"] != PROTOCOL
         or manifest["split"] != "official_train/val_inner"
@@ -65,6 +70,9 @@ def verified_complete(output, stage, fingerprint=None):
     if fingerprint is not None and complete["binding"] != fingerprint:
         raise ValueError(f"Experiment binding changed in {output}; choose a new run directory")
     required = {
+        "s1_eval": {"summary.json", "summary.csv", "predictions.jsonl", "eval_manifest.json",
+                    "review.html", "review-clean.html", "degradation_interaction.json"},
+        "audit": {"summary.json", "diagnostics.json", "predictions.jsonl", "manifest.json"},
         "d0": {"predictions.jsonl", "identity.json", "baseline_summary.json", "baseline_summary.csv"},
         "s0": {"oracle_predictions.jsonl", "oracle_summary.json", "oracle_summary.csv",
                "oracle_coverage.json", "decision.md"},
@@ -147,6 +155,8 @@ def execute(stage, mode, manifest_path, paths, model_config, config, output, rev
     verify_pillow()
     manifest = read_json(manifest_path)
     validate_manifest(manifest)
+    if stage == "s0" and manifest["schema"] != 1:
+        raise ValueError("S0 requires a separate diagnostic manifest with OCR annotations")
     evaluator()  # Fail before model loading if the scoring source is missing.
     if mode == "smoke" and len(manifest["images"]) > 20:
         raise ValueError("Smoke mode supports at most 20 images")

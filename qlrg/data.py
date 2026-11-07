@@ -116,6 +116,12 @@ def get_words(ocr, image_id):
     return words
 
 
+def split_inner(train, seed):
+    ranked = sorted(train, key=lambda iid: (rank(seed, iid), iid))
+    val_count = max(1, (len(ranked) + 5) // 10)
+    return ranked[val_count:], ranked[:val_count]
+
+
 def build_manifest(textvqa, textocr, limit=500, seed=42):
     verify_pillow()
     if limit < 1:
@@ -128,9 +134,7 @@ def build_manifest(textvqa, textocr, limit=500, seed=42):
         heldout_qids = {str(row["question_id"]) for row in heldout}
         if train.keys() & heldout_images or train_qids & heldout_qids:
             raise ValueError(f"Official train and {split} overlap")
-    ranked = sorted(train, key=lambda iid: (rank(seed, iid), iid))
-    val_count = max(1, (len(ranked) + 5) // 10)
-    val_inner = ranked[:val_count]
+    train_inner, val_inner = split_inner(train, seed)
     ocr = read_json(textocr)
     records = []
     orientation_audit = Counter()
@@ -161,7 +165,7 @@ def build_manifest(textvqa, textocr, limit=500, seed=42):
     return {
         "schema": 1, "protocol": PROTOCOL, "split": "official_train/val_inner",
         "seed": seed, "requested_images": limit, "train_images": len(train),
-        "val_inner_image_ids": val_inner, "train_inner_ids_hash": object_hash(ranked[val_count:]),
+        "val_inner_image_ids": val_inner, "train_inner_ids_hash": object_hash(train_inner),
         "eligible_val_inner_images": len(eligible),
         "annotation_sha256": {
             split: sha256(annotation_file(textvqa, split)) for split in ("train", "val", "test")

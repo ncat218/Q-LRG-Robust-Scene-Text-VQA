@@ -21,7 +21,7 @@ paths = dataset_paths(read_config(os.environ.get("QLRG_PATHS_CONFIG", "configs/p
 model = read_config("configs/model_qwen.yaml")
 snapshot = paths["hf_hub"] / ("models--" + model["id"].replace("/", "--")) / "snapshots" / model["revision"]
 for path in (
-    paths["textvqa"] / "TextVQA_0.5.1_train.json", paths["textocr"], snapshot / "config.json",
+    paths["textvqa"] / "TextVQA_0.5.1_train.json", snapshot / "config.json",
     snapshot / "tokenizer.json", snapshot / "preprocessor_config.json",
 ):
     if not path.is_file():

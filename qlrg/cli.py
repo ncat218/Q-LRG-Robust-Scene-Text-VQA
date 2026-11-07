@@ -42,12 +42,27 @@ def main():
                                    help="Allow provisional OCR grounding for full S0")
             run.add_argument("--d0-run", type=Path, help="Matching D0 stage directory if kept under a different run")
     s1 = commands.add_parser("s1")
-    s1.add_argument("--from-run", type=Path, required=True)
+    anchor = s1.add_mutually_exclusive_group(required=True)
+    anchor.add_argument("--from-run", type=Path)
+    anchor.add_argument("--data-dir", type=Path)
+    s1.add_argument("--baseline-audit", type=Path)
     s1.add_argument("--run-dir", type=Path, required=True)
     s1.add_argument("--config", type=Path, default=Path("configs/s1.yaml"))
     s1.add_argument("--model-config", type=Path, default=Path("configs/model_qwen.yaml"))
+    dataset = commands.add_parser("build-s1-data")
+    dataset.add_argument("--output", type=Path, required=True)
+    dataset.add_argument("--seed", type=int, default=42)
+    audit = commands.add_parser("audit-a0")
+    audit.add_argument("--from-run", type=Path, required=True)
+    audit.add_argument("--pilot-run", type=Path)
+    audit.add_argument("--run-dir", type=Path, required=True)
+    audit.add_argument("--model-config", type=Path, default=Path("configs/model_qwen.yaml"))
+    official = commands.add_parser("evaluate-s1")
+    official.add_argument("--from-run", type=Path, required=True)
+    official.add_argument("--run-dir", type=Path, required=True)
+    official.add_argument("--model-config", type=Path, default=Path("configs/model_qwen.yaml"))
     verify = commands.add_parser("verify-run")
-    verify.add_argument("--stage", choices=("d0", "s0", "s1"), required=True)
+    verify.add_argument("--stage", choices=("d0", "s0", "s1", "audit", "s1_eval"), required=True)
     verify.add_argument("--run-dir", type=Path, required=True)
     build_review = commands.add_parser("build-review", help="Export the case browser for an existing S0 run")
     build_review.add_argument("--run-dir", type=Path, required=True)
@@ -82,7 +97,21 @@ def main():
         print(report.resolve())
         return
     paths = dataset_paths(read_config(args.paths))
-    if args.command == "build-manifest":
+    if args.command == "build-s1-data":
+        from .s1_manifests import build_s1_manifests
+
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        with FileLock(str(args.output) + ".lock", timeout=0):
+            build_s1_manifests(paths["textvqa"], args.output, args.seed)
+    elif args.command == "audit-a0":
+        from .a0_audit import run_audit
+
+        run_audit(args.from_run, args.run_dir / "audit", paths, read_config(args.model_config), pilot=args.pilot_run)
+    elif args.command == "evaluate-s1":
+        from .s1_evaluate import evaluate_s1
+
+        evaluate_s1(args.from_run, args.run_dir / "s1_eval", paths, read_config(args.model_config))
+    elif args.command == "build-manifest":
         if args.output.exists():
             raise FileExistsError(args.output)
         manifest = build_manifest(paths["textvqa"], paths["textocr"], args.images, args.seed)
@@ -102,7 +131,7 @@ def main():
         for split, digest in manifest["annotation_sha256"].items():
             if sha256(annotation_file(paths["textvqa"], split)) != digest:
                 raise ValueError(f"Annotation file changed for {split}")
-        if sha256(paths["textocr"]) != manifest["textocr_sha256"]:
+        if manifest["schema"] == 1 and sha256(paths["textocr"]) != manifest["textocr_sha256"]:
             raise ValueError("TextOCR source changed")
         for image in manifest["images"]:
             decoded, orientation, _ = load_clean(paths["textvqa"] / image["image_rel"], image["image_sha256"])
@@ -118,7 +147,8 @@ def main():
         from .s1_run import run_s1
 
         run_s1(args.from_run, args.run_dir / "s1", paths,
-               read_config(args.model_config), read_config(args.config))
+               read_config(args.model_config), read_config(args.config),
+               dataset_dir=args.data_dir, audit_path=args.baseline_audit)
     else:
         execute(
             args.command, args.mode, args.manifest, paths,

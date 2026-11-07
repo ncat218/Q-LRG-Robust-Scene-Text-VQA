@@ -17,5 +17,15 @@
     "cpus": 8,
     "memory": "48G",
     "time": "06:00:00"
+  },
+  "audit": {
+    "cpus": 4,
+    "memory": "32G",
+    "time": "03:00:00"
+  },
+  "s1-eval": {
+    "cpus": 8,
+    "memory": "48G",
+    "time": "04:00:00"
   }
 }

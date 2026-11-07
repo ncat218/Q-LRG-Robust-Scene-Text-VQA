@@ -4,7 +4,9 @@ import importlib.metadata
 import io
 import math
 import os
+import shutil
 import time
+from pathlib import Path
 from contextlib import nullcontext
 from itertools import islice
 
@@ -21,14 +23,31 @@ from .oracle import feature_pair
 from .qwen_wrapper import Qwen, assert_aligned
 from .s1_data import build_train_plan, compare_archived_baselines, read_eval_anchor, training_examples
 from .s1_model import LanguageLoRA, VisualResidual, teacher_forced_loss, text_training
-from .s1_report import LABELS, CONDITIONS, write_report, write_visuals
+from .s1_report import LABELS, EXTRA_LABELS, CONDITIONS, write_report, write_visuals
+
+
+def runtime_shared(paths, model_config):
+    packages = {name: importlib.metadata.version(name) for name in (
+        "torch", "torchvision", "transformers", "Pillow", "safetensors", "numpy", "tokenizers", "huggingface-hub",
+    )}
+    return {"model": model_config, "source_hash": code_hash(), "packages": packages,
+              "torch_build": torch.__version__, "torch_cuda": torch.version.cuda, "preprocessing": PROTOCOL,
+              "device": torch.cuda.get_device_name(),
+              "paths": {key: str(value) for key, value in paths.items()}}
 
 
 def validate_config(config):
-    for key in ("train_images", "epochs", "accumulate", "checkpoint_every", "hidden",
+    if type(config["seed"]) is not int or type(config.get("clean_controls", False)) is not bool:
+        raise ValueError("S1 seed must be an integer and clean_controls must be a boolean")
+    if config["train_images"] != "all" and (type(config["train_images"]) is not int or config["train_images"] < 1):
+        raise ValueError("train_images must be a positive integer or all")
+    for key in ("epochs", "accumulate", "checkpoint_every", "hidden",
                 "spatial_blocks", "lora_rank", "max_answer_tokens", "bootstrap_resamples"):
         if type(config[key]) is not int or config[key] < 1:
             raise ValueError(f"S1 requires a positive integer for {key}")
+    clean_penalty = config.get("clean_residual_weight", 0)
+    if not math.isfinite(clean_penalty) or clean_penalty < 0:
+        raise ValueError("clean_residual_weight must be finite and nonnegative")
     for key in ("learning_rate", "max_grad_norm", "lora_alpha", "feature_weight",
                 "residual_weight", "weight_decay", "clean_fraction"):
         if not math.isfinite(config[key]) or config[key] < 0:
@@ -74,6 +93,7 @@ class ImageFeatures:
 
 def make_adapter(qwen, arm, config):
     torch.manual_seed(config["seed"])
+    arm = arm.removesuffix("clean")
     if arm == "A0":
         return None
     language = qwen.model.model.language_model
@@ -86,6 +106,7 @@ def make_adapter(qwen, arm, config):
 
 
 def loss_for(qwen, arm, adapter, cache, question, condition, answer, config):
+    arm = arm.removesuffix("clean")
     base = cache.features[condition]
     if arm == "A2":
         replacement = base
@@ -94,14 +115,15 @@ def loss_for(qwen, arm, adapter, cache, question, condition, answer, config):
     if arm in ("S1a", "S1b"):
         match = F.mse_loss(replacement, cache.features["CLEAN"].float())
         if arm == "S1a":
-            return match
+            penalty = config.get("clean_residual_weight", 0) * delta.square().mean() if condition == "CLEAN" else 0
+            return match + penalty
     tokenizer = qwen.processor.tokenizer
     tokens = tokenizer.encode(answer, add_special_tokens=False)[:config["max_answer_tokens"]]
     tokens.append(tokenizer.eos_token_id)
     prompt = cache.prompt(condition, question["question"])
     loss = teacher_forced_loss(qwen, prompt, replacement.to(qwen.dtype), tokens)
     if arm == "S1b":
-        loss = loss + config["feature_weight"] * match + config["residual_weight"] * delta.square().mean()
+        loss = loss + config["feature_weight"] * match + (config["residual_weight"] + (config.get("clean_residual_weight", 0) if condition == "CLEAN" else 0)) * delta.square().mean()
     return loss
 
 
@@ -124,7 +146,7 @@ def train(qwen, arm, adapter, cache, examples, config, path, fingerprint):
         if not any(step["grad_norm"] > 0 for step in history):
             raise RuntimeError(f"{arm} produced no nonzero adapter gradients")
         return history
-    attach = adapter.attached() if arm == "A2" else nullcontext()
+    attach = adapter.attached() if arm.removesuffix("clean") == "A2" else nullcontext()
     is_cuda = torch.device(qwen.device).type == "cuda"
     remaining = iter(examples[offset:])
     accumulate = config["accumulate"]
@@ -169,7 +191,7 @@ def probe_gradients(qwen, cache, examples, config):
     results = {}
     for arm in ("S1b", "A2"):
         adapter = make_adapter(qwen, arm, config)
-        attach = adapter.attached() if arm == "A2" else nullcontext()
+        attach = adapter.attached() if arm.removesuffix("clean") == "A2" else nullcontext()
         with attach, text_training(qwen.model, True):
             loss = loss_for(qwen, arm, adapter, cache, question, condition, answer, config)
             loss.backward()
@@ -188,7 +210,7 @@ def predict(qwen, arm, adapter, cache, manifest, stage, scorer):
     qwen.model.eval()
     if adapter is not None:
         adapter.eval()
-    attach = adapter.attached() if arm == "A2" else nullcontext()
+    attach = adapter.attached() if arm.removesuffix("clean") == "A2" else nullcontext()
     with attach, torch.inference_mode():
         for index, image in enumerate(manifest["images"]):
             iid = image["image_id"]
@@ -202,7 +224,7 @@ def predict(qwen, arm, adapter, cache, manifest, stage, scorer):
                     base = cache.features[condition]
                     feature = base
                     adapter_seconds = 0.0
-                    if arm in ("A1", "S1a", "S1b"):
+                    if arm.removesuffix("clean") in ("A1", "S1a", "S1b"):
                         torch.cuda.synchronize()
                         start = time.perf_counter()
                         restored, _ = adapter(base, cache.grid)
@@ -237,22 +259,37 @@ def predict(qwen, arm, adapter, cache, manifest, stage, scorer):
     return rows
 
 
-def run_s1(source, output, paths, model_config, config):
+def run_s1(source, output, paths, model_config, config, dataset_dir=None, audit_path=None):
     if not os.environ.get("SLURM_JOB_ID"):
         raise RuntimeError("S1 must run in a Slurm GPU allocation")
     verify_pillow()
     validate_config(config)
     scorer = evaluator()
-    manifest, d0_binding, s0_binding = read_eval_anchor(source, paths, model_config)
-    packages = {name: importlib.metadata.version(name) for name in (
-        "torch", "torchvision", "transformers", "Pillow", "safetensors", "numpy", "tokenizers", "huggingface-hub",
-    )}
-    shared = {"model": model_config, "source_hash": code_hash(), "packages": packages,
-              "torch_build": torch.__version__, "torch_cuda": torch.version.cuda, "preprocessing": PROTOCOL,
-              "device": torch.cuda.get_device_name(),
-              "paths": {key: str(value) for key, value in paths.items()}}
-    binding = {"stage": "s1", "config": config, "shared": shared, "source": str(source.resolve()),
+    datasets, dataset_hashes = None, None
+    if dataset_dir is None:
+        manifest, d0_binding, s0_binding = read_eval_anchor(source, paths, model_config)
+        if config["train_images"] == "all":
+            raise ValueError("Expanded training needs independently validated S1 manifests and A0 audit")
+    else:
+        from .s1_manifests import read_s1_manifests
+
+        datasets, dataset_hashes = read_s1_manifests(dataset_dir, paths["textvqa"])
+        manifest = datasets["val_inner"]
+        d0_binding, s0_binding = None, None
+    shared = runtime_shared(paths, model_config)
+    audit_binding = None
+    if dataset_dir is not None:
+        from .a0_audit import validate_audit
+
+        if audit_path is None:
+            raise ValueError("Expanded S1 requires a passing A0 audit")
+        audit_binding = validate_audit(audit_path, shared)
+    labels = {**LABELS, **(EXTRA_LABELS if config.get("clean_controls", False) else {})}
+    binding = {"stage": "s1", "config": config, "shared": shared, "source": str(source.resolve()) if source else None,
                "d0_binding": d0_binding, "s0_binding": s0_binding, "eval_manifest": object_hash(manifest)}
+    if dataset_dir is not None:
+        binding.update({"dataset_hashes": dataset_hashes, "dataset_dir": str(dataset_dir.resolve()),
+                        "audit_binding": audit_binding, "evaluation_role": "hyperparameter_selection"})
     output.mkdir(parents=True, exist_ok=True)
     with FileLock(str(output / ".run.lock"), timeout=0):
         plan_path = output / "train_manifest.json"
@@ -260,7 +297,14 @@ def run_s1(source, output, paths, model_config, config):
         if binding_path.is_file():
             plan = read_json(plan_path)
         else:
-            plan = build_train_plan(paths["textvqa"], manifest, config["train_images"], config["seed"])
+            if datasets is None:
+                plan = build_train_plan(paths["textvqa"], manifest, config["train_images"], config["seed"])
+            else:
+                all_train = datasets["train_inner"]["images"]
+                count = len(all_train) if config["train_images"] == "all" else config["train_images"]
+                if count > len(all_train):
+                    raise ValueError("Requested more images than train_inner contains")
+                plan = all_train[:count]
             write_json(plan_path, plan)
         binding["train_manifest"] = object_hash(plan)
         fingerprint = object_hash(binding)
@@ -274,7 +318,10 @@ def run_s1(source, output, paths, model_config, config):
             print(f"Verified completed S1 at {output}")
             return
 
-        write_json(output / "baseline_audit.json", compare_archived_baselines(source, manifest))
+        write_json(output / "baseline_audit.json",
+                   compare_archived_baselines(source, manifest) if datasets is None else
+                   {"audit_binding": audit_binding, "audit_run": str(audit_path.resolve())})
+        write_json(output / "eval_manifest.json", manifest)
         qwen = Qwen(model_config, paths["hf_hub"])
         identity = output / "identity.json"
         if not identity.exists():
@@ -282,6 +329,17 @@ def run_s1(source, output, paths, model_config, config):
         if not read_json(identity)["passed"]:
             raise RuntimeError("S1 identity gate failed")
         cache = ImageFeatures(qwen, paths["textvqa"], output, shared)
+        if datasets is not None:
+            cache_root = Path(os.environ.get("QLRG_FEATURE_CACHE", output / "features"))
+            cache_root.mkdir(parents=True, exist_ok=True)
+            max_tokens = model_config["max_pixels"] // (28 * 28) + 128
+            estimate = max_tokens * qwen.model.config.text_config.hidden_size * 4 * (len(plan) + len(manifest["images"]))
+            free = shutil.disk_usage(cache_root).free
+            write_json(output / "storage.json", {"cache": str(cache_root), "estimated_upper_bytes": estimate, "free_bytes": free})
+            # Existing cache entries may be reusable, so the full bound is informational.
+            next_pair_bound = max_tokens * qwen.model.config.text_config.hidden_size * 4
+            if free < 2 * next_pair_bound:
+                raise RuntimeError("Insufficient free space to atomically write the next feature pair")
         examples = list(training_examples(plan, config["epochs"], config["seed"], config["clean_fraction"]))
         gradient_gate = output / "gradient_gate.json"
         if not gradient_gate.exists():
@@ -290,15 +348,17 @@ def run_s1(source, output, paths, model_config, config):
             raise RuntimeError("S1 gradient gate failed")
         rows, stats = [], {}
         # Train each variant from its own initialization before any evaluation is inspected.
-        for arm in LABELS:
+        for arm in labels:
             if arm == "A0":
                 continue
             stage = output / "variants" / arm
             adapter = make_adapter(qwen, arm, config)
             torch.cuda.reset_peak_memory_stats()
-            history = train(qwen, arm, adapter, cache, examples, config, stage / "checkpoint.pt", fingerprint)
+            arm_examples = [(im, q, "CLEAN", answer) for im, q, _, answer in examples] if arm in EXTRA_LABELS else examples
+            history = train(qwen, arm, adapter, cache, arm_examples, config, stage / "checkpoint.pt", fingerprint)
             stats[arm] = {
                 "parameters": sum(p.numel() for p in adapter.parameters()),
+                "training_condition": "CLEAN-only" if arm in EXTRA_LABELS else "CLEAN/LR4",
                 "steps": len(history), "examples": len(examples), "history": history,
                 "training_seconds": sum(h["seconds"] for h in history),
                 "peak_allocated_bytes": max(h.get("peak_allocated_bytes", 0) for h in history),
@@ -306,7 +366,7 @@ def run_s1(source, output, paths, model_config, config):
             write_json(stage / "training.json", stats[arm])
             del adapter
 
-        for arm in LABELS:
+        for arm in labels:
             stage = output / "variants" / arm
             adapter = make_adapter(qwen, arm, config)
             if adapter is not None:
@@ -323,7 +383,7 @@ def run_s1(source, output, paths, model_config, config):
         write_report(output, manifest, rows, stats, examples, config)
         artifacts = {p.name: sha256(p) for p in output.iterdir() if p.is_file() and not p.name.startswith(".")}
         artifacts.update({p.relative_to(output).as_posix(): sha256(p)
-                          for name in LABELS if name != "A0"
+                          for name in labels if name != "A0"
                           for p in (output / "variants" / name).rglob("*")
                           if p.is_file() and (p.name in {"checkpoint.pt", "training.json"} or "heatmaps" in p.parts)})
         write_json(output / "COMPLETE.json", {"stage": "s1", "binding": fingerprint, "artifacts": artifacts})

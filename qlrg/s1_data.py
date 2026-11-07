@@ -1,7 +1,7 @@
 """Rebuild the locked split, plan common S1 examples and audit baseline parity."""
 
 from .common import object_hash, read_json, read_jsonl, sha256
-from .data import PROTOCOL, annotation_file, load_clean, question_groups, rank, read_questions
+from .data import PROTOCOL, annotation_file, load_clean, question_groups, rank, read_questions, split_inner
 from .experiment import validate_manifest, verified_complete
 
 
@@ -29,10 +29,7 @@ def read_eval_anchor(source, paths, model_config):
 
 def build_train_plan(textvqa, evaluation, count, train_seed):
     train = question_groups(read_questions(textvqa, "train"))
-    split_seed = evaluation["seed"]
-    ranked = sorted(train, key=lambda iid: (rank(split_seed, iid), iid))
-    val_count = max(1, (len(ranked) + 5) // 10)
-    val, inner = ranked[:val_count], ranked[val_count:]
+    inner, val = split_inner(train, evaluation["seed"])
     if val != evaluation["val_inner_image_ids"] or object_hash(inner) != evaluation["train_inner_ids_hash"]:
         raise ValueError("Rebuilt train/val split differs from the D0/S0 split")
     eval_ids = {row["image_id"] for row in evaluation["images"]}

@@ -15,3 +15,5 @@ The diagnostic set uses a fixed prefix of the TextOCR-covered images in a 90/10 
 - [Validation status](docs/implementation_review.md)
 
 Source datasets, per-question manifests, review images, predictions, model weights and caches stay in the HPC workspace or another user-selected private location.
+
+For the next repeatability audit and expanded S1 protocol, use the [A0 audit and expanded S1 runbook](docs/h200_runbook.md#expanded-s1-and-a0-audit). It separates OCR-free training, development selection and official-validation reporting.

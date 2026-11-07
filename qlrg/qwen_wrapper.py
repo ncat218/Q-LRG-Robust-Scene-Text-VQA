@@ -80,6 +80,11 @@ class Qwen:
         return {"answer": answer.strip(), "token_ids": tokens, "generation_seconds": elapsed}
 
     @torch.inference_mode()
+    def prefill_logits(self, batch, feature=None):
+        with self.replacement(batch, feature):
+            return self.model(**batch, use_cache=False, logits_to_keep=1).logits
+
+    @torch.inference_mode()
     def compare(self, native_batch, injected_batch, feature):
         """Require exact prefill logits and generated token IDs for parity controls."""
         expected = self.model(**native_batch, use_cache=False, logits_to_keep=1).logits

@@ -96,3 +96,44 @@ If the job stops, resubmit the same run directory with the original checkout and
 ```bash
 python3 run_all.py --mode s1 --resume "$run"
 ```
+## Expanded S1 and A0 audit
+
+All comparisons use the project's own frozen Qwen control. Train on train_inner, select hyperparameters on val_inner, and report the locked models on labeled official validation. The official test set is optional final submission only. Keep validation labels out of training. The first S1 pilot already selected training images without TextOCR. Its 500-image evaluation anchor and the old common preflight depended on TextOCR.
+
+The next job repeats both native A0 and cached-injection A0 twice over the full 500-image anchor. It compares token IDs and scores within each path and between paths. Native versus injected mismatches trigger fresh-feature and prefill-logit diagnostics. These are two full passes inside one job. Cross-job variability requires a second audit job with the same settings.
+
+```bash
+python3 run_all.py --mode audit \
+  --from-run runs/full500-20261106T120210Z-6z0yzfi_ \
+  --pilot-run runs/s1-20261106T161413Z-lm0jjs3z
+```
+
+The audit job also verifies the pilot's actual training manifest against its saved hash and the evaluation manifest, checking disjoint image IDs, question IDs and image SHA-256 values. It writes `audit/pilot_train_manifest.json` and `audit/pilot_split_audit.json`. The summary separates current repeatability, current path equivalence, and historical D0/pilot differences. Read the per-question records before attributing any difference to numeric nondeterminism.
+
+After the GPU audit, the job prepares three independent OCR-free manifests under `datasets/`. Image files are resolved under the configured TextVQA root. The builder checks source annotation hashes, image bytes, answer counts and overlap across train_inner, val_inner and official_val. Counts come from the actual data. Dataset preparation stops if required validation images are unavailable. The job packages the audit and complete manifests into `review.tar.gz` in its run directory.
+
+Expanded training requires a completed passing audit for the same code, model, preprocessing, package versions, device and paths. The supplied expanded configuration is a candidate with all train_inner images, two epochs, 40% clean images and a 0.1 additional clean-residual penalty. It includes six trained variants plus A0. Tune these choices on val_inner. It is not a convergence claim.
+
+The following is a training template for a later approved allocation. Replace the audit directory with the actual printed run path.
+
+```bash
+audit_run=runs/audit-<timestamp>-<suffix>
+export QLRG_FEATURE_CACHE="$PWD/runs/shared-features"
+python3 run_all.py --mode s1 \
+  --data-dir "$audit_run/datasets" --baseline-audit "$audit_run/audit" \
+  --s1-config configs/s1_expanded.json --time 24:00:00
+```
+
+For a learning-rate sweep and repeated seeds, generate candidate JSON configs from `configs/s1_expanded.json` using `python3 scripts/prepare_s1_study.py --output local/s1-study`. The default grid is three seeds (42, 43, 44) and three learning rates (5e-5, 1e-4, 2e-4). This prepares nine candidate configurations. Schedule the budget after the A0 audit and data counts are reviewed. Give every arm the same candidate grid, data, example count and optimizer-step budget. Evaluate candidates on val_inner, record the selection rule, then use at least three distinct seeds for the selected regime. Record each seed separately before aggregating image-paired effects and seed variability. The expanded run reports A1clean and A2clean, which use the same question and answer schedule as the other arms but CLEAN inputs throughout.
+
+The feature cache stores both CLEAN and LR4 tensors. At full scale it may require hundreds of GB depending on token grids. The training preflight records a conservative storage bound and available space in `s1/storage.json`. Matching seeds and learning rates can share cached features under an unchanged code/model/preprocessing signature. Walltime estimates must account for initial cache construction and additional clean-only controls.
+
+Once hyperparameters and checkpoints are locked, official validation is a separate evaluation job.
+
+```bash
+python3 run_all.py --mode s1-eval --from-run runs/<selected-expanded-S1-run>
+```
+
+It verifies the saved checkpoints and manifests, performs no optimizer steps and writes `s1_eval/` results. Both development and official-validation reports include `degradation_interaction.csv`, with image-cluster intervals for the paired four-score quantity (target LR4 − baseline LR4) − (target CLEAN − baseline CLEAN). Preserve paired image sampling across both conditions.
+
+Keep S2/S3 on hold while resolving A0 differences and testing the expanded restoration versus A1/A2. Require clear paired evidence across seeds before advancing under this protocol. A negative result supports the conclusion that the observed gains mainly reflect adaptation within the evaluated regime. Verify any claim about the base Qwen model's TextVQA pretraining exposure separately.
