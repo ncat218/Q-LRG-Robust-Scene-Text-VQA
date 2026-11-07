@@ -6,39 +6,44 @@ Checkout riêng trên `crop-branch`. Tái sử dụng manifest, Qwen wrapper, sc
 
 ## Crop theo câu hỏi
 
-Tạo tối đa 16 cửa sổ chồng lấn từ ảnh LR4. Mỗi cửa sổ mặc định có chiều rộng và chiều cao bằng 60% canvas. [CLIP ViT-B/32](https://huggingface.co/openai/clip-vit-base-patch32/tree/3d74acf9a28c67741b2f4f2ea7635f0aaf6f0268) đóng băng chọn vùng có cosine lớn nhất giữa embedding của cửa sổ và embedding câu hỏi. Crop được zoom bicubic 1,5× trước khi đưa vào Qwen. Bộ chọn chỉ dùng pixel LR4 và văn bản câu hỏi. Đáp án chuẩn được dùng sau khi sinh dự đoán để tính điểm.
+Mặc định dùng SD-RPN Qwen2.5-VL-3B K21/T3 để đề xuất vùng từ ảnh LR4 và câu hỏi, với tối đa 288 token ở bước chọn vùng và ngưỡng 0,15. Bước này dùng môi trường Transformers 4.51.3 riêng. Trong cùng job, môi trường Q-LRG nạp Qwen gốc sau khi tiến trình chọn vùng thoát. Nó kiểm tra hash pixel LR4 của hai bước, cắt hộp SD-RPN và zoom bicubic 1,5×. Nếu SD-RPN không tìm thấy vùng, Qwen nhận toàn ảnh LR4 và báo cáo ghi ca fallback. Các đầu vào của bộ chọn chỉ chứa ảnh và văn bản câu hỏi. Đáp án chuẩn được dùng ở bước chấm sau dự đoán. [Paper SD-RPN](https://openreview.net/pdf/592acc72239cdc9214dbc4b0e1b63dcc8d2e311f.pdf)
+
+Job 11304 dùng baseline CLIP ViT-B/32 với tối đa 16 cửa sổ cố định, kích thước 60% chiều rộng và chiều cao ảnh. Dùng `--selector clip` để tái lập cách chọn này. SD-RPN và CLIP có thể chọn vùng khác kích thước, nên so sánh giữa chúng cần báo cáo cả số visual token và tỷ lệ fallback.
 
 | Nhánh | Đầu vào |
 | --- | --- |
 | `full` | Toàn ảnh LR4, giữ nguyên visual feature của Qwen |
 | `query` | Crop theo query, giữ nguyên visual feature |
-| `shuffled` | Cùng tập cửa sổ, chọn bằng query khác từ một ảnh khác. Qwen vẫn trả lời query gốc. |
+| `shuffled` | Chọn vùng bằng câu hỏi khác từ một ảnh khác. Qwen vẫn trả lời câu hỏi gốc. |
 | `full_restore` | Toàn ảnh LR4, sửa feature sau Merger bằng checkpoint S1 |
 | `query_restore` | Đúng ảnh crop của `query`, sửa feature bằng cùng checkpoint S1 |
 
-`query` so với `shuffled` đo tác động của query lên chọn vùng với cùng kích thước crop. Khi hai query chọn cùng vùng thì dùng lại dự đoán vì Qwen nhận cùng ảnh và câu hỏi. `query` so với `full` đo tác động tổng của crop và zoom. `full_restore` so với `full` và `query_restore` so với `query` đo riêng tác động của phục hồi trên hai dạng đầu vào. `query_restore` so với `full_restore` đo hiệu quả khi chuyển cùng restorer từ toàn ảnh sang crop. Nếu crop kém, phép so này chưa phân biệt được lỗi chọn vùng, mất ngữ cảnh và mức độ phù hợp của checkpoint huấn luyện trên toàn ảnh. Các nhánh đi qua cùng đường injection, với feature gốc làm mốc.
+`query` so với `shuffled` đo tác động của query lên chọn vùng. Ở baseline CLIP kích thước crop cố định, còn SD-RPN có thể đổi cả vị trí, kích thước và quyết định fallback. Khi hai nhánh có cùng ảnh đầu vào và câu hỏi, dùng lại dự đoán. `query` so với `full` đo tác động tổng của crop và zoom. `full_restore` so với `full` và `query_restore` so với `query` đo riêng tác động của phục hồi trên hai dạng đầu vào. `query_restore` so với `full_restore` đo hiệu quả khi chuyển cùng restorer từ toàn ảnh sang crop. Các nhánh đi qua cùng đường injection, với feature gốc làm mốc.
 
-Chạy trên `val_inner` từ manifest audit. Mặc định dùng toàn bộ split. Dùng `--images 500` nếu cần một tập con cố định theo seed. Khoá cấu hình và checkpoint trên dev trước khi dùng `--split official_val`. Baseline này dùng cửa sổ ảnh. Detector của nhóm và phép so toàn ảnh + crop là các thử nghiệm riêng.
+Chạy trên `val_inner` từ manifest audit. Mặc định dùng toàn bộ split. Dùng `--images 500` nếu cần một tập con cố định theo seed. Khoá cấu hình và checkpoint trên dev trước khi dùng `--split official_val`. Phép so toàn ảnh + crop là lượt riêng.
 
 ```bash
 main=/datastore/dungmt/textvqa/Tuan/Q-LRG-Robust-Scene-Text-VQA
 crop=/datastore/dungmt/textvqa/Tuan/Q-LRG-crop
 data="$main/runs/audit-20261107T042743Z-3zuwy0dc/datasets"
 
-# Trong checkout crop sau khi job oracle đã dừng hoặc hoàn tất.
 cd "$crop"
 git pull --ff-only origin crop-branch
-python3 run_query_crop.py --env "$main/.venv" --data-dir "$data"
+python3 run_query_crop.py --env "$main/.venv" --data-dir "$data" \
+  --sdrpn-env /path/to/sdrpn-venv --sdrpn-vendor /path/to/vendor \
+  --sdrpn-checkpoint /path/to/sdrpn-3b-snapshot
 ```
 
 Khi job S1 đã có `s1/COMPLETE.json`, thêm `--s1-run` và `--arm` để chạy đủ năm nhánh. Ví dụ sau chọn S1b. Chốt arm trên dev trước khi đánh giá cuối.
 
 ```bash
 python3 run_query_crop.py --env "$main/.venv" --data-dir "$data" \
+  --sdrpn-env /path/to/sdrpn-venv --sdrpn-vendor /path/to/vendor \
+  --sdrpn-checkpoint /path/to/sdrpn-3b-snapshot \
   --s1-run "$main/runs/s1-20261107T051836Z-wymhdtwk" --arm S1b
 ```
 
-Launcher submit ngay. Slurm worker dùng môi trường có sẵn, lấy checkpoint CLIP ghim revision khi cache trống (khoảng 605 MB) và ghi kết quả riêng trong `runs/query-crop-…`. Cache mặc định ở `local/selector-cache` của checkout crop. Nếu compute node không truy cập được Hugging Face, có thể chuẩn bị cache tại node có mạng từ thư mục crop bằng lệnh:
+Launcher submit ngay. SD-RPN ghi tọa độ và kết quả trong `runs/sdrpn-crop-…`, với một file đề xuất mỗi ảnh để hỗ trợ resume. Checkpoint và môi trường SD-RPN có sẵn được đọc tại chỗ. Lượt `--selector clip` ghi trong `runs/query-crop-…` và lấy checkpoint CLIP ghim revision khi cache trống (khoảng 605 MB). Có thể chuẩn bị cache CLIP tại node có mạng từ thư mục crop bằng lệnh:
 
 ```bash
 "$main/.venv/bin/python" -B -c 'from scripts.query_crop import selector_snapshot; print(selector_snapshot("local/selector-cache"))'

@@ -1,5 +1,6 @@
 """Evaluate question-selected LR4 crops with a frozen image/text embedding model."""
 
+import hashlib
 import io
 import math
 import os
@@ -19,6 +20,7 @@ from qlrg.evaluation import SCORER_REVISION, evaluator, paired_bootstrap
 from qlrg.experiment import paired_images, verified_complete
 from qlrg.grid_alignment import image_grid
 from qlrg.s1_manifests import read_s1_manifests
+from scripts.sdrpn_backend import run_selector, selector_provenance
 
 
 SELECTOR_ID = "openai/clip-vit-base-patch32"
@@ -136,37 +138,61 @@ def select_box(boxes, scores):
 
 
 @torch.inference_mode()
-def predict_image(model, selector, adapter, scorer, image, donors, root, output, settings):
+def predict_image(model, selector, adapter, scorer, image, donors, root, output, settings, proposals=None):
     _, lr4 = paired_images(root, image)
     iid = image["image_id"]
     questions = image["questions"]
-    queries = [text for q in questions for text in (q["question"], donors[q["question_id"]][1])]
-    boxes = candidate_boxes(lr4.size, settings["crop_fraction"])
-    start = time.perf_counter()
-    similarities = selector.rank(lr4, boxes, queries)
-    selector_seconds = time.perf_counter() - start
-    if len(similarities) != len(queries):
-        raise ValueError("Selector returned the wrong number of query rankings")
+    if proposals is None:
+        queries = [text for q in questions for text in (q["question"], donors[q["question_id"]][1])]
+        boxes = candidate_boxes(lr4.size, settings["crop_fraction"])
+        start = time.perf_counter()
+        similarities = selector.rank(lr4, boxes, queries)
+        selector_seconds = time.perf_counter() - start
+        if len(similarities) != len(queries):
+            raise ValueError("Selector returned the wrong number of query rankings")
+        regions = {
+            str(q["question_id"]): {
+                route: dict(zip(("box", "clip_cosine"), select_box(boxes, similarities[2 * index + j])))
+                for j, route in enumerate(("query", "shuffled"))
+            }
+            for index, q in enumerate(questions)
+        }
+    else:
+        if proposals["image_id"] != iid or proposals["lr4_sha256"] != hashlib.sha256(lr4.tobytes()).hexdigest():
+            raise ValueError(f"SD-RPN and Q-LRG did not use the same LR4 pixels for {iid}")
+        regions, selector_seconds = proposals["questions"], proposals["selector_seconds"]
+        if regions.keys() != {str(q["question_id"]) for q in questions}:
+            raise ValueError(f"SD-RPN proposal coverage differs for {iid}")
     full_preview = save_preview(output, [iid, "full"], lr4)
     full_box = (0, 0, *lr4.size)
     rows = []
-    for index, question in enumerate(questions):
+    for question in questions:
         qid, text = question["question_id"], question["question"]
-        query_box, query_sim = select_box(boxes, similarities[2 * index])
-        shuffled_box, shuffled_sim = select_box(boxes, similarities[2 * index + 1])
+        selections = regions[str(qid)]
         native_results = {}
+        restored_results = {}
         zoom = settings["zoom"]
-        for route, box, similarity in (("full", full_box, None), ("query", query_box, query_sim),
-                                       ("shuffled", shuffled_box, shuffled_sim)):
-            if route == "full":
+        for route in ("full", "query", "shuffled"):
+            selection = selections[route] if route != "full" else {}
+            selected_box = selection.get("box")
+            box = tuple(selected_box) if selected_box is not None else full_box
+            if selected_box is None:
                 pixels, preview = lr4, full_preview
             else:
+                x0, y0, x1, y1 = box
+                if not (0 <= x0 < x1 <= lr4.width and 0 <= y0 < y1 <= lr4.height):
+                    raise ValueError(f"Out-of-bounds crop for question {qid}: {box}")
                 crop = lr4.crop(box)
-                pixels = crop.resize(tuple(round(n * zoom) for n in crop.size), Image.Resampling.BICUBIC)
+                scale = max(zoom, 28 / min(crop.size))
+                pixels = crop.resize(tuple(max(28, round(n * scale)) for n in crop.size), Image.Resampling.BICUBIC)
                 preview = save_preview(output, [qid, route], lr4, box, pixels)
-            # Reuse the same decoded prediction when the two selectors choose identical pixels.
-            if route == "shuffled" and box == query_box:
-                result, grid_thw, vision_seconds = native_results["query"]
+            reuse = None
+            if route != "full" and selected_box is None:
+                reuse = "full"
+            elif route == "shuffled" and selected_box == selections["query"]["box"]:
+                reuse = "query"
+            if reuse:
+                result, grid_thw, vision_seconds = native_results[reuse]
             else:
                 batch = model.prepare(pixels, text)
                 grid_thw = batch["image_grid_thw"][0].tolist()
@@ -182,17 +208,23 @@ def predict_image(model, selector, adapter, scorer, image, donors, root, output,
             metadata = {
                 "image_id": iid, "question_id": qid, "crop_xyxy": box, "input_size": pixels.size,
                 "grid_thw": grid_thw, "visual_tokens": math.prod(grid), "preview": preview,
-                "clip_cosine": similarity, "vision_seconds": vision_seconds,
+                "clip_cosine": selection.get("clip_cosine"), "vision_seconds": vision_seconds,
+                "roi_selected": selected_box is not None if route != "full" else None,
+                "foreground_tokens": selection.get("foreground_tokens"),
                 "selector_donor_qid": donors[qid][0] if route == "shuffled" else None,
             }
             rows.append({"arm": route, **metadata, **result})
             if adapter is not None and route in ("full", "query"):
-                start = time.perf_counter()
-                restored, _ = adapter(base, grid)
-                restored = restored.to(model.dtype)
-                torch.cuda.synchronize()
-                restore_seconds = time.perf_counter() - start
-                result = model.generate(batch, restored)
+                if reuse:
+                    result, restore_seconds = restored_results[reuse]
+                else:
+                    start = time.perf_counter()
+                    restored, _ = adapter(base, grid)
+                    restored = restored.to(model.dtype)
+                    torch.cuda.synchronize()
+                    restore_seconds = time.perf_counter() - start
+                    result = model.generate(batch, restored)
+                    restored_results[route] = (result, restore_seconds)
                 rows.append({"arm": route + "_restore", **metadata, **result, "restore_seconds": restore_seconds})
     references = {q["question_id"]: scorer._compute_answer_scores(q["answers"]) for q in questions}
     for row in rows:
@@ -286,10 +318,12 @@ def run(output):
     shared = runtime_shared(paths, config)
     checkpoint = checkpoint_for(settings, shared, hashes)
     labels = LABELS if checkpoint else {arm: LABELS[arm] for arm in ("full", "query", "shuffled")}
+    use_sdrpn = settings.get("selector", "clip") == "sdrpn"
+    selector_binding = selector_provenance(settings, repo) if use_sdrpn else {"id": SELECTOR_ID, "revision": SELECTOR_REVISION}
     binding = {
         "stage": "query_crop", "settings": settings, "shared": shared, "dataset_hashes": hashes,
         "selected_images": [image["image_id"] for image in selected],
-        "selector": {"id": SELECTOR_ID, "revision": SELECTOR_REVISION},
+        "selector": selector_binding,
         "crop_code_sha256": sha256(Path(__file__)),
         "report_template_sha256": sha256(repo / "qlrg" / "case_review.html"),
         "checkpoint": checkpoint["provenance"] if checkpoint else None,
@@ -304,10 +338,15 @@ def run(output):
             raise ValueError(f"Run is already complete: {output}")
         write_json(state, binding)
         print(f"Query crop on {manifest['split']}: {len(selected)} images, {len(labels)} arms", flush=True)
-        print(f"Loading selector {SELECTOR_ID} at {SELECTOR_REVISION} from {settings['selector_cache']}", flush=True)
-        snapshot = selector_snapshot(settings["selector_cache"])
+        proposals = None
+        if use_sdrpn:
+            print(f"Generating boxes with {selector_binding['id']}", flush=True)
+            proposals = run_selector(settings, repo, output, paths, config, selected, donors)
+        else:
+            print(f"Loading selector {SELECTOR_ID} at {SELECTOR_REVISION} from {settings['selector_cache']}", flush=True)
+            snapshot = selector_snapshot(settings["selector_cache"])
         model = Qwen(config, paths["hf_hub"])
-        selector = ClipSelector(snapshot, model.device)
+        selector = None if use_sdrpn else ClipSelector(snapshot, model.device)
         adapter = None
         if checkpoint:
             adapter = make_adapter(model, settings["arm"], checkpoint["config"])
@@ -322,7 +361,9 @@ def run(output):
                 if any(not (output / row["preview"]).is_file() for row in batch["rows"]):
                     raise ValueError(f"Missing review preview for completed shard: {shard}")
             else:
-                batch = predict_image(model, selector, adapter, scorer, image, donors, paths["textvqa"], output, settings)
+                roi = read_json(proposals / shard.name) if proposals else None
+                batch = predict_image(model, selector, adapter, scorer, image, donors, paths["textvqa"], output,
+                                      settings, proposals=roi)
                 write_json(shard, batch)
             rows.extend(batch["rows"])
             selector_seconds += batch["selector_seconds"]
@@ -330,6 +371,11 @@ def run(output):
                 print(f"Query crop: {index}/{len(selected)} images", flush=True)
         summary = summarize(rows, labels, manifest, selector_seconds, settings["seed"])
         summary["checkpoint"] = binding["checkpoint"]
+        summary["selector"] = selector_binding["id"]
+        summary["no_roi_fallbacks"] = {
+            arm: sum(r["arm"] == arm and r["roi_selected"] is False for r in rows)
+            for arm in ("query", "shuffled")
+        }
         summary["peak_cuda_allocated_bytes"] = torch.cuda.max_memory_allocated()
         write_json(output / "summary.json", summary)
         write_jsonl(output / "predictions.jsonl", rows)
