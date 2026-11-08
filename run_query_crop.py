@@ -27,6 +27,7 @@ def main():
     parser.add_argument("--selector-cache", type=Path)
     parser.add_argument("--s1-run", type=Path)
     parser.add_argument("--arm", choices=("S1a", "S1b"))
+    parser.add_argument("--from-crop-run", type=Path, help="Reuse crops from a completed SD-RPN val_inner run")
     parser.add_argument("--split", choices=("val_inner", "official_val"))
     parser.add_argument("--images", type=int)
     parser.add_argument("--crop-fraction", type=float)
@@ -47,7 +48,7 @@ def main():
 
     sdrpn_options = ("sdrpn_env", "sdrpn_vendor", "sdrpn_checkpoint")
     settings = ("data_dir", "env", "paths", "selector", "selector_cache", "s1_run", "arm", "split",
-                "images", "crop_fraction", "zoom", "seed", "sdrpn_libexpat", *sdrpn_options)
+                "images", "crop_fraction", "zoom", "seed", "from_crop_run", "sdrpn_libexpat", *sdrpn_options)
     if args.resume is not None:
         if any(getattr(args, name) is not None for name in settings):
             parser.error("--resume reuses the original settings. Only --time and --dry-run may be overridden.")
@@ -55,6 +56,22 @@ def main():
         launch = json.loads((run_dir / "launch.json").read_text(encoding="utf-8"))
         if Path(launch["repo"]) != REPO or (run_dir / "COMPLETE.json").exists():
             parser.error("Resume an unfinished run from its original checkout")
+    elif args.from_crop_run is not None:
+        if args.s1_run is None or args.arm is None:
+            parser.error("--from-crop-run requires --s1-run and --arm")
+        if any(getattr(args, name) is not None for name in settings if name not in ("s1_run", "arm", "from_crop_run")):
+            parser.error("--from-crop-run inherits the crop cohort, model environment and zoom")
+        source = args.from_crop_run.resolve()
+        if not all((source / name).is_file() for name in ("COMPLETE.json", "launch.json", "run.json", "predictions.jsonl")):
+            parser.error("--from-crop-run requires completed crop artifacts")
+        launch = json.loads((source / "launch.json").read_text(encoding="utf-8"))
+        if (launch.get("selector") != "sdrpn" or launch["split"] != "val_inner"
+            or launch["s1_run"] is not None or Path(launch["repo"]) != REPO):
+            parser.error("Use a completed SD-RPN val_inner baseline in this checkout")
+        launch.update({
+            "from_crop_run": str(source), "s1_run": str(args.s1_run.resolve()), "arm": args.arm,
+            "time": args.time or "06:00:00",
+        })
     else:
         if args.data_dir is None:
             parser.error("--data-dir is required")
@@ -101,9 +118,16 @@ def main():
     python = Path(launch["env"]) / "bin/python"
     required = [python, Path(launch["paths"]), Path(launch["data_dir"]) / "COMPLETE.json",
                 Path(launch["data_dir"]) / f"{launch['split']}.json"]
+    replay = bool(launch.get("from_crop_run"))
     if launch["s1_run"] is not None:
-        required.append(Path(launch["s1_run"]) / "s1" / "COMPLETE.json")
-    if launch.get("selector") == "sdrpn":
+        s1 = Path(launch["s1_run"]) / "s1"
+        if replay:
+            arm_dir = s1 / "variants" / launch["arm"]
+            required.extend((s1 / "run.json", s1 / "train_manifest.json",
+                             arm_dir / "checkpoint.pt", arm_dir / "training.json"))
+        else:
+            required.append(s1 / "COMPLETE.json")
+    if launch.get("selector") == "sdrpn" and not replay:
         required.extend((
             Path(launch["sdrpn_env"]) / "bin/python",
             Path(launch["sdrpn_vendor"]) / "qwen_src/qwen2_5_vl/modeling_qwen2_5_vl.py",
@@ -116,7 +140,7 @@ def main():
         if not path.is_file():
             parser.error(f"Required file not found: {path}")
 
-    if launch.get("selector") == "sdrpn" and not args.dry_run:
+    if launch.get("selector") == "sdrpn" and not replay and not args.dry_run:
         subprocess.run([
             str(Path(launch["sdrpn_env"]) / "bin" / "python"), "-B", "-c",
             'import pyexpat, importlib.metadata; '
@@ -129,7 +153,7 @@ def main():
         runs = REPO / "runs"
         runs.mkdir(exist_ok=True)
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-        prefix = "sdrpn-crop" if launch["selector"] == "sdrpn" else "query-crop"
+        prefix = "sdrpn-restore" if replay else ("sdrpn-crop" if launch["selector"] == "sdrpn" else "query-crop")
         run_dir = Path(tempfile.mkdtemp(prefix=f"{prefix}-{timestamp}-", dir=runs))
         (run_dir / "launch.json").write_text(json.dumps(launch, indent=2) + "\n", encoding="utf-8")
 
@@ -146,7 +170,7 @@ def main():
     ])
     resources = json.loads((REPO / "configs/slurm_hpc.json").read_text(encoding="utf-8"))
     full = resources["full"]
-    job = "qlrg-sdrpn-crop" if launch.get("selector") == "sdrpn" else "qlrg-query-crop"
+    job = "qlrg-sdrpn-restore" if replay else ("qlrg-sdrpn-crop" if launch.get("selector") == "sdrpn" else "qlrg-query-crop")
     submit = [
         "sbatch", "--parsable", f"--chdir={REPO}", f"--job-name={job}",
         f"--account={resources['account']}", f"--partition={resources['partition']}",

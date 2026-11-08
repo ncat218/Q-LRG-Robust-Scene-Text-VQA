@@ -20,6 +20,7 @@ from qlrg.evaluation import SCORER_REVISION, evaluator, paired_bootstrap
 from qlrg.experiment import paired_images, verified_complete
 from qlrg.grid_alignment import image_grid
 from qlrg.s1_manifests import read_s1_manifests
+from scripts.crop_replay import read_crops
 from scripts.sdrpn_backend import run_selector, selector_provenance
 
 
@@ -142,6 +143,7 @@ def predict_image(model, selector, adapter, scorer, image, donors, root, output,
     _, lr4 = paired_images(root, image)
     iid = image["image_id"]
     questions = image["questions"]
+    replay = bool(settings.get("from_crop_run"))
     if proposals is None:
         queries = [text for q in questions for text in (q["question"], donors[q["question_id"]][1])]
         boxes = candidate_boxes(lr4.size, settings["crop_fraction"])
@@ -158,12 +160,14 @@ def predict_image(model, selector, adapter, scorer, image, donors, root, output,
             for index, q in enumerate(questions)
         }
     else:
-        if proposals["image_id"] != iid or proposals["lr4_sha256"] != hashlib.sha256(lr4.tobytes()).hexdigest():
+        if proposals["image_id"] != iid or (
+            not replay and proposals["lr4_sha256"] != hashlib.sha256(lr4.tobytes()).hexdigest()
+        ):
             raise ValueError(f"SD-RPN and Q-LRG did not use the same LR4 pixels for {iid}")
         regions, selector_seconds = proposals["questions"], proposals["selector_seconds"]
         if regions.keys() != {str(q["question_id"]) for q in questions}:
             raise ValueError(f"SD-RPN proposal coverage differs for {iid}")
-    full_preview = save_preview(output, [iid, "full"], lr4)
+    full_preview = proposals["full_preview"] if replay else save_preview(output, [iid, "full"], lr4)
     full_box = (0, 0, *lr4.size)
     rows = []
     for question in questions:
@@ -172,7 +176,7 @@ def predict_image(model, selector, adapter, scorer, image, donors, root, output,
         native_results = {}
         restored_results = {}
         zoom = settings["zoom"]
-        for route in ("full", "query", "shuffled"):
+        for route in (("full", "query") if replay else ("full", "query", "shuffled")):
             selection = selections[route] if route != "full" else {}
             selected_box = selection.get("box")
             box = tuple(selected_box) if selected_box is not None else full_box
@@ -185,7 +189,7 @@ def predict_image(model, selector, adapter, scorer, image, donors, root, output,
                 crop = lr4.crop(box)
                 scale = max(zoom, 28 / min(crop.size))
                 pixels = crop.resize(tuple(max(28, round(n * scale)) for n in crop.size), Image.Resampling.BICUBIC)
-                preview = save_preview(output, [qid, route], lr4, box, pixels)
+                preview = selection["preview"] if replay else save_preview(output, [qid, route], lr4, box, pixels)
             reuse = None
             if route != "full" and selected_box is None:
                 reuse = "full"
@@ -204,6 +208,10 @@ def predict_image(model, selector, adapter, scorer, image, donors, root, output,
                 result = model.generate(batch, base)
                 native_results[route] = (result, grid_thw, vision_seconds)
 
+            if replay and route == "query" and (
+                list(pixels.size) != selection["input_size"] or grid_thw != selection["grid_thw"]
+            ):
+                raise ValueError(f"Replayed SD-RPN input changed for question {qid}")
             grid = image_grid(grid_thw)
             metadata = {
                 "image_id": iid, "question_id": qid, "crop_xyxy": box, "input_size": pixels.size,
@@ -220,6 +228,8 @@ def predict_image(model, selector, adapter, scorer, image, donors, root, output,
                 else:
                     start = time.perf_counter()
                     restored, _ = adapter(base, grid)
+                    if restored.shape != base.shape:
+                        raise ValueError(f"Restoration changed the visual token count for {qid}/{route}")
                     restored = restored.to(model.dtype)
                     torch.cuda.synchronize()
                     restore_seconds = time.perf_counter() - start
@@ -253,8 +263,6 @@ def summarize(rows, labels, manifest, selector_seconds, seed):
         "split": manifest["split"], "images": len(images), "questions": len(expected),
         "scorer_revision": SCORER_REVISION, "selector_seconds_total": selector_seconds,
         "bootstrap_unit": "image_id", "bootstrap_resamples": 10000,
-        "same_query_and_shuffled_boxes": sum(a["crop_xyxy"] == b["crop_xyxy"]
-                                             for a, b in zip(by_arm["query"], by_arm["shuffled"])),
         "arms": {
             arm: {"label": labels[arm], "accuracy_pct": 100 * mean(scores[arm]),
                   "mean_visual_tokens": mean(row["visual_tokens"] for row in predictions),
@@ -265,6 +273,10 @@ def summarize(rows, labels, manifest, selector_seconds, seed):
         },
         "comparisons": comparisons,
     }
+    if "shuffled" in by_arm:
+        summary["same_query_and_shuffled_boxes"] = sum(
+            a["crop_xyxy"] == b["crop_xyxy"] for a, b in zip(by_arm["query"], by_arm["shuffled"])
+        )
     if "query_restore" in labels:
         for raw, restored in (("full", "full_restore"), ("query", "query_restore")):
             if any((x["crop_xyxy"], x["grid_thw"]) != (y["crop_xyxy"], y["grid_thw"])
@@ -273,6 +285,21 @@ def summarize(rows, labels, manifest, selector_seconds, seed):
         full_gain = [y - x for x, y in zip(scores["full"], scores["full_restore"])]
         crop_gain = [y - x for x, y in zip(scores["query"], scores["query_restore"])]
         summary["restoration_gain_crop_minus_full"] = paired_bootstrap(full_gain, crop_gain, groups, 10000, seed)
+        selected = [i for i, row in enumerate(by_arm["query"]) if row.get("roi_selected") is True]
+        if selected:
+            roi_groups = [groups[i] for i in selected]
+            roi_scores = {arm: [values[i] for i in selected] for arm, values in scores.items()}
+            summary["roi_only"] = {
+                "questions": len(selected), "images": len(set(roi_groups)),
+                "accuracy_pct": {arm: 100 * mean(values) for arm, values in roi_scores.items()},
+                "comparisons": [
+                    {"reference": a, "target": b, **paired_bootstrap(roi_scores[a], roi_scores[b], roi_groups, 10000, seed)}
+                    for a, b in PAIRS if a in labels and b in labels
+                ],
+                "restoration_gain_crop_minus_full": paired_bootstrap(
+                    [full_gain[i] for i in selected], [crop_gain[i] for i in selected], roi_groups, 10000, seed,
+                ),
+            }
     return summary
 
 
@@ -280,7 +307,15 @@ def checkpoint_for(settings, shared, dataset_hashes):
     if settings["s1_run"] is None:
         return None
     output = Path(settings["s1_run"]) / "s1"
-    trained = verified_complete(output, "s1")
+    replay = bool(settings.get("from_crop_run"))
+    if not replay or (output / "COMPLETE.json").is_file():
+        trained = verified_complete(output, "s1")
+    else:
+        if settings["split"] != "val_inner":
+            raise ValueError("A finalized arm before S1 completion may only be explored on val_inner")
+        trained = read_json(output / "run.json")
+        if trained["stage"] != "s1":
+            raise ValueError("Expected an S1 training binding")
     # The crop checkout extends the HTML report. The audited inference and adapter
     # source, preprocessing, packages and model still have to match the S1 run.
     if any(trained["shared"].get(key) != value for key, value in shared.items() if key != "source_hash"):
@@ -289,11 +324,23 @@ def checkpoint_for(settings, shared, dataset_hashes):
         raise ValueError("Use the expanded S1 run trained with the same split manifests")
     arm = settings["arm"]
     path = output / "variants" / arm / "checkpoint.pt"
+    digest = sha256(path)
     checkpoint = torch.load(path, map_location="cpu", weights_only=True)
-    if checkpoint["arm"] != arm or checkpoint["binding"] != object_hash(trained):
+    if checkpoint["arm"] != arm or checkpoint["binding"] != object_hash(trained) or sha256(path) != digest:
         raise ValueError(f"Checkpoint does not belong to the selected S1 run: {path}")
+    if replay:
+        plan = read_json(output / "train_manifest.json")
+        if object_hash(plan) != trained["train_manifest"]:
+            raise ValueError("S1 training manifest does not match its binding")
+        examples = sum(len(image["questions"]) for image in plan) * trained["config"]["epochs"]
+        steps = math.ceil(examples / trained["config"]["accumulate"])
+        finished = read_json(path.with_name("training.json"))
+        history = checkpoint["history"]
+        if (checkpoint["examples"] != examples or finished["examples"] != examples or finished["steps"] != steps
+            or len(history) != steps or history[-1]["examples"] != examples or finished["history"] != history):
+            raise ValueError(f"{arm} does not have a verified final checkpoint")
     return {"state": checkpoint["adapter"], "config": trained["config"],
-            "provenance": {"arm": arm, "sha256": sha256(path), "s1_binding": checkpoint["binding"]}}
+            "provenance": {"arm": arm, "sha256": digest, "s1_binding": checkpoint["binding"]}}
 
 
 def run(output):
@@ -313,13 +360,22 @@ def run(output):
     selected = images
     if settings["images"] is not None:
         selected = sorted(images, key=lambda row: rank(settings["seed"], row["image_id"]))[:settings["images"]]
-    donors = donor_questions(images, selected, settings["seed"])
+    replay = settings.get("from_crop_run")
+    donors = {} if replay else donor_questions(images, selected, settings["seed"])
     manifest = {**manifest, "images": selected}
     shared = runtime_shared(paths, config)
     checkpoint = checkpoint_for(settings, shared, hashes)
     labels = LABELS if checkpoint else {arm: LABELS[arm] for arm in ("full", "query", "shuffled")}
     use_sdrpn = settings.get("selector", "clip") == "sdrpn"
-    selector_binding = selector_provenance(settings, repo) if use_sdrpn else {"id": SELECTOR_ID, "revision": SELECTOR_REVISION}
+    if replay:
+        if checkpoint is None or not use_sdrpn:
+            raise ValueError("SD-RPN crop replay requires a restorer checkpoint")
+        crops, selector_binding, replay_binding = read_crops(Path(replay), output, settings, shared, hashes, selected)
+        labels = {arm: LABELS[arm] for arm in ("full", "query", "full_restore", "query_restore")}
+    elif use_sdrpn:
+        selector_binding = selector_provenance(settings, repo)
+    else:
+        selector_binding = {"id": SELECTOR_ID, "revision": SELECTOR_REVISION}
     binding = {
         "stage": "query_crop", "settings": settings, "shared": shared, "dataset_hashes": hashes,
         "selected_images": [image["image_id"] for image in selected],
@@ -328,6 +384,8 @@ def run(output):
         "report_template_sha256": sha256(repo / "qlrg" / "case_review.html"),
         "checkpoint": checkpoint["provenance"] if checkpoint else None,
     }
+    if replay:
+        binding["replay"] = replay_binding
     fingerprint = object_hash(binding)
     with FileLock(str(output / ".query-crop.lock"), timeout=0):
         state = output / "run.json"
@@ -339,7 +397,9 @@ def run(output):
         write_json(state, binding)
         print(f"Query crop on {manifest['split']}: {len(selected)} images, {len(labels)} arms", flush=True)
         proposals = None
-        if use_sdrpn:
+        if replay:
+            print(f"Replaying locked SD-RPN crops from {replay}", flush=True)
+        elif use_sdrpn:
             print(f"Generating boxes with {selector_binding['id']}", flush=True)
             proposals = run_selector(settings, repo, output, paths, config, selected, donors)
         else:
@@ -358,10 +418,10 @@ def run(output):
             shard = output / "shards" / f"{object_hash(image['image_id'])[:24]}.json"
             if shard.is_file():
                 batch = read_json(shard)
-                if any(not (output / row["preview"]).is_file() for row in batch["rows"]):
+                if not replay and any(not (output / row["preview"]).is_file() for row in batch["rows"]):
                     raise ValueError(f"Missing review preview for completed shard: {shard}")
             else:
-                roi = read_json(proposals / shard.name) if proposals else None
+                roi = crops[image["image_id"]] if replay else (read_json(proposals / shard.name) if proposals else None)
                 batch = predict_image(model, selector, adapter, scorer, image, donors, paths["textvqa"], output,
                                       settings, proposals=roi)
                 write_json(shard, batch)
@@ -372,14 +432,19 @@ def run(output):
         summary = summarize(rows, labels, manifest, selector_seconds, settings["seed"])
         summary["checkpoint"] = binding["checkpoint"]
         summary["selector"] = selector_binding["id"]
+        if replay:
+            summary["replay"] = replay_binding
         summary["no_roi_fallbacks"] = {
             arm: sum(r["arm"] == arm and r["roi_selected"] is False for r in rows)
-            for arm in ("query", "shuffled")
+            for arm in ("query", "shuffled") if arm in labels
         }
         summary["peak_cuda_allocated_bytes"] = torch.cuda.max_memory_allocated()
         write_json(output / "summary.json", summary)
         write_jsonl(output / "predictions.jsonl", rows)
         previews = {f"{r['question_id']}-{r['arm']}": r["preview"] for r in rows}
+        if replay:
+            available = {path for path in set(previews.values()) if (output / path).is_file()}
+            previews = {key: path for key, path in previews.items() if path in available}
         write_case_review(output / "review.html", rows, labels, title="Crop theo query · LR4",
                           manifest=manifest, seed=settings["seed"], crop_previews=previews)
         artifacts = ("summary.json", "predictions.jsonl", "review.html")

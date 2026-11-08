@@ -43,6 +43,16 @@ python3 run_query_crop.py --env "$main/.venv" --data-dir "$data" \
   --s1-run "$main/runs/s1-20261107T051836Z-wymhdtwk" --arm S1b
 ```
 
+Để thử phục hồi trên đúng crop đã chấm ở `val_inner`, dùng `--from-crop-run`. Launcher thừa hưởng cohort, zoom và môi trường Qwen của run nguồn. Job kiểm tra checksum dự đoán nguồn, dùng lại tọa độ và chạy bốn nhánh `full`, `full_restore`, `query`, `query_restore`. Phục hồi sửa feature sau Merger và giữ nguyên kích thước grid cùng toàn bộ visual token. Chế độ này chấp nhận một nhánh S1 đã lưu checkpoint cuối và `training.json` khi các nhánh S1 khác còn chạy. Worker xác minh số mẫu, số bước, lịch sử huấn luyện và binding trước khi nạp restorer.
+
+```bash
+python3 run_query_crop.py \
+  --from-crop-run "$crop/runs/sdrpn-crop-20261107T173143Z-heum7_b7" \
+  --s1-run "$main/runs/s1-20261107T051836Z-wymhdtwk" --arm S1b
+```
+
+Kết quả nằm trong `runs/sdrpn-restore-…`. `summary.json` báo cáo cả tập và nhóm `roi_only` có crop thật, tách các ca quay về toàn ảnh. `review.html` tham chiếu ảnh xem trước đã lưu ở run SD-RPN nguồn. Giữ các đường dẫn tương đối của hai run khi tải cả HTML và ảnh về.
+
 Launcher submit ngay. SD-RPN ghi tọa độ và kết quả trong `runs/sdrpn-crop-…`, với một file đề xuất mỗi ảnh để hỗ trợ resume. Checkpoint và môi trường SD-RPN có sẵn được đọc tại chỗ. Lượt `--selector clip` ghi trong `runs/query-crop-…` và lấy checkpoint CLIP ghim revision khi cache trống (khoảng 605 MB). Có thể chuẩn bị cache CLIP tại node có mạng từ thư mục crop bằng lệnh:
 
 ```bash
