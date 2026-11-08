@@ -51,9 +51,10 @@ python3 run_query_crop.py \
   --s1-run "$main/runs/s1-20261107T051836Z-wymhdtwk" --arm S1b
 ```
 
-Dùng `--arms S1a S1b A1` thay cho `--arm S1b` để so các checkpoint trong một job replay.
+Dùng `--arms S1a S1b A1 A2` thay cho `--arm S1b` để so các checkpoint trong một job replay.
 S1a học khớp feature sạch, S1b học thêm từ đáp án và A1 là visual adapter chỉ học từ đáp án.
-Mỗi đầu vào chạy Qwen gốc và ba checkpoint trên cùng feature đầu vào. Cả ba giữ đủ token của crop.
+A2 gắn LoRA vào Q/V của attention trong LLM khi sinh đáp án và dùng nguyên feature đầu vào.
+Mỗi đầu vào chạy Qwen gốc và bốn checkpoint trên cùng feature đầu vào. Tất cả giữ đủ token của crop.
 `summary.json` ghi SHA-256 từng checkpoint và CI ghép cặp giữa các checkpoint trên toàn ảnh, crop, và nhóm có crop thật.
 
 Kết quả nằm trong `runs/sdrpn-restore-…`. `summary.json` báo cáo cả tập và nhóm `roi_only` có crop thật, tách các ca quay về toàn ảnh. `review.html` tham chiếu ảnh xem trước đã lưu ở run SD-RPN nguồn. Giữ các đường dẫn tương đối của hai run khi tải cả HTML và ảnh về.

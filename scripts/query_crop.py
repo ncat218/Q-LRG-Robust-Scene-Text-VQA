@@ -40,6 +40,7 @@ VARIANT_LABELS = {
     "S1a": "S1a (khớp feature sạch)",
     "S1b": "S1b (khớp feature sạch và học từ đáp án)",
     "A1": "A1 (visual adapter học từ đáp án)",
+    "A2": "A2 (LoRA Q/V trong LLM, học từ đáp án)",
 }
 
 
@@ -232,14 +233,19 @@ def predict_image(model, selector, adapters, scorer, image, donors, root, output
                 if reuse:
                     result, restore_seconds = restored_results[reuse, variant]
                 else:
-                    start = time.perf_counter()
-                    restored, _ = adapter(base, grid)
-                    if restored.shape != base.shape:
-                        raise ValueError(f"Restoration changed the visual token count for {qid}/{route}")
-                    restored = restored.to(model.dtype)
-                    torch.cuda.synchronize()
-                    restore_seconds = time.perf_counter() - start
-                    result = model.generate(batch, restored)
+                    if variant == "A2":
+                        with adapter.attached():
+                            result = model.generate(batch, base)
+                        restore_seconds = 0.0
+                    else:
+                        start = time.perf_counter()
+                        restored, _ = adapter(base, grid)
+                        if restored.shape != base.shape:
+                            raise ValueError(f"Restoration changed the visual token count for {qid}/{route}")
+                        restored = restored.to(model.dtype)
+                        torch.cuda.synchronize()
+                        restore_seconds = time.perf_counter() - start
+                        result = model.generate(batch, restored)
                     restored_results[route, variant] = (result, restore_seconds)
                 rows.append({"arm": f"{route}_{variant}", **metadata, **result, "restore_seconds": restore_seconds})
     references = {q["question_id"]: scorer._compute_answer_scores(q["answers"]) for q in questions}
@@ -404,7 +410,7 @@ def run(output):
     use_sdrpn = settings.get("selector", "clip") == "sdrpn"
     if replay:
         if not checkpoints or not use_sdrpn:
-            raise ValueError("SD-RPN crop replay requires a visual checkpoint")
+            raise ValueError("SD-RPN crop replay requires a trained checkpoint")
         crops, selector_binding, replay_binding = read_crops(Path(replay), output, settings, shared, hashes, selected)
     elif use_sdrpn:
         selector_binding = selector_provenance(settings, repo)

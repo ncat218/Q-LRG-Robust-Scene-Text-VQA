@@ -28,8 +28,8 @@ def main():
     parser.add_argument("--s1-run", type=Path)
     checkpoint_options = parser.add_mutually_exclusive_group()
     checkpoint_options.add_argument("--arm", choices=("S1a", "S1b"))
-    checkpoint_options.add_argument("--arms", nargs="+", choices=("S1a", "S1b", "A1"),
-                                    help="Compare visual checkpoints in the same SD-RPN replay")
+    checkpoint_options.add_argument("--arms", nargs="+", choices=("S1a", "S1b", "A1", "A2"),
+                                    help="Compare S1 and adaptation checkpoints in the same SD-RPN replay")
     parser.add_argument("--from-crop-run", type=Path, help="Reuse crops from a completed SD-RPN val_inner run")
     parser.add_argument("--split", choices=("val_inner", "official_val"))
     parser.add_argument("--images", type=int)

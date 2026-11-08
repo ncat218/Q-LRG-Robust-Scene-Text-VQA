@@ -4,6 +4,7 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import torch
@@ -11,6 +12,7 @@ from PIL import Image
 
 from qlrg.case_review import write_case_review
 from qlrg.common import object_hash, sha256, write_json, write_jsonl
+from qlrg.s1_model import LanguageLoRA, LoRALinear
 from scripts.crop_replay import read_crops
 from scripts.query_crop import LABELS, candidate_boxes, checkpoints_for, donor_questions, predict_image, summarize
 from scripts.sdrpn_runtime import selector_environment
@@ -80,12 +82,25 @@ class QueryCropTest(unittest.TestCase):
             model = Mock(dtype=torch.float32)
             model.prepare.return_value = {"image_grid_thw": torch.tensor([[1, 2, 4]])}
             model.encode.return_value = torch.zeros((2, 3))
+            query_proj = torch.nn.Linear(3, 3).requires_grad_(False)
+            value_proj = torch.nn.Linear(3, 3).requires_grad_(False)
+            attention = SimpleNamespace(q_proj=query_proj, v_proj=value_proj)
+            language = SimpleNamespace(layers=[SimpleNamespace(self_attn=attention)])
+
             def generate(batch, features):
                 token = int(features[0, 0])
+                if isinstance(attention.q_proj, LoRALinear):
+                    self.assertIsInstance(attention.v_proj, LoRALinear)
+                    self.assertIs(features, model.encode.return_value)
+                    token = 4
+                else:
+                    self.assertIs(attention.q_proj, query_proj)
+                    self.assertIs(attention.v_proj, value_proj)
                 return {"answer": "open" if token == 3 else "closed", "generation_seconds": 0.1, "token_ids": [token]}
 
             model.generate.side_effect = generate
             adapters = {
+                "A2": LanguageLoRA(language, rank=2, alpha=2),
                 "S1a": lambda features, grid: (features + 1, torch.ones_like(features)),
                 "S1b": lambda features, grid: (features + 2, torch.ones_like(features)),
                 "A1": lambda features, grid: (features + 3, torch.ones_like(features)),
@@ -99,7 +114,7 @@ class QueryCropTest(unittest.TestCase):
             self.assertFalse((output / "review-images").exists())
             rows = {(row["question_id"], row["arm"]): row for row in result["rows"]}
             labels = {arm: arm for arm in ("full", "query")}
-            for variant, token in (("S1a", 1), ("S1b", 2), ("A1", 3)):
+            for variant, token in (("S1a", 1), ("S1b", 2), ("A1", 3), ("A2", 4)):
                 full, query = f"full_{variant}", f"query_{variant}"
                 labels.update({full: full, query: query})
                 self.assertEqual(rows[1, query]["crop_xyxy"], (0, 0, 40, 20))
@@ -112,8 +127,12 @@ class QueryCropTest(unittest.TestCase):
             self.assertEqual(report["roi_only"]["accuracy_pct"]["query_A1"], 100)
             self.assertIn(("query_S1a", "query_A1"),
                           {(x["reference"], x["target"]) for x in report["roi_only"]["comparisons"]})
+            self.assertIn(("query_A1", "query_A2"),
+                          {(x["reference"], x["target"]) for x in report["roi_only"]["comparisons"]})
+            self.assertIs(attention.q_proj, query_proj)
+            self.assertIs(attention.v_proj, value_proj)
             self.assertEqual(model.encode.call_count, 3)
-            self.assertEqual(model.generate.call_count, 12)
+            self.assertEqual(model.generate.call_count, 15)
 
     def test_expat_preload_is_scoped_to_selector_child(self):
         with patch.dict(os.environ, {"LD_PRELOAD": "/old.so", "PYTHONPATH": "/wrong"}):
