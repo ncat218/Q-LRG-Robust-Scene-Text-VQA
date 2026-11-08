@@ -12,7 +12,7 @@ from PIL import Image
 from qlrg.case_review import write_case_review
 from qlrg.common import object_hash, sha256, write_json, write_jsonl
 from scripts.crop_replay import read_crops
-from scripts.query_crop import LABELS, candidate_boxes, checkpoint_for, donor_questions, predict_image, summarize
+from scripts.query_crop import LABELS, candidate_boxes, checkpoints_for, donor_questions, predict_image, summarize
 from scripts.sdrpn_runtime import selector_environment
 
 
@@ -37,16 +37,22 @@ class QueryCropTest(unittest.TestCase):
             write_json(arm / "training.json", {"examples": 4, "steps": 2, "history": history})
             torch.save(checkpoint, path)
             settings = {"s1_run": str(root), "arm": "S1b", "split": "val_inner", "from_crop_run": "source"}
-            loaded = checkpoint_for(settings, {**shared, "source_hash": "crop"}, hashes)
-            self.assertEqual(loaded["provenance"]["sha256"], sha256(path))
+            loaded = checkpoints_for(settings, {**shared, "source_hash": "crop"}, hashes)
+            self.assertEqual(loaded["S1b"]["provenance"]["sha256"], sha256(path))
+            a1 = s1 / "variants" / "A1"
+            write_json(a1 / "training.json", {"examples": 4, "steps": 2, "history": history})
+            torch.save({**checkpoint, "arm": "A1"}, a1 / "checkpoint.pt")
+            settings = {**settings, "arm": None, "arms": ["S1b", "A1"]}
+            self.assertEqual(set(checkpoints_for(settings, shared, hashes)), {"S1b", "A1"})
             torch.save({**checkpoint, "examples": 2}, path)
-            with self.assertRaisesRegex(ValueError, "verified final checkpoint"):
-                checkpoint_for(settings, shared, hashes)
+            with self.assertRaisesRegex(ValueError, "S1b does not have a verified final checkpoint"):
+                checkpoints_for(settings, shared, hashes)
 
     def test_replay_restores_all_tokens_on_the_archived_crop_and_full_image(self):
         lr4 = Image.new("RGB", (80, 40), "white")
         image = {"image_id": "one", "size": [80, 40], "questions": [
             {"question_id": 1, "question": "Read it.", "answers": ["open"] * 10},
+            {"question_id": 2, "question": "Read the sign.", "answers": ["open"] * 10},
         ]}
         settings = {"selector": "sdrpn", "split": "val_inner", "zoom": 1.5, "seed": 42, "images": None,
                     "from_crop_run": "source"}
@@ -62,6 +68,10 @@ class QueryCropTest(unittest.TestCase):
                 {"image_id": "one", "question_id": 1, "arm": "query", "preview": "review-images/query.jpg",
                  "crop_xyxy": [0, 0, 40, 20], "roi_selected": True, "foreground_tokens": 4,
                  "input_size": [60, 30], "grid_thw": [1, 2, 4]},
+                {"image_id": "one", "question_id": 2, "arm": "full", "preview": "review-images/full.jpg"},
+                {"image_id": "one", "question_id": 2, "arm": "query", "preview": "review-images/full.jpg",
+                 "crop_xyxy": [0, 0, 80, 40], "roi_selected": False, "foreground_tokens": 0,
+                 "input_size": [80, 40], "grid_thw": [1, 2, 4]},
             ]
             write_jsonl(source / "predictions.jsonl", records)
             write_json(source / "COMPLETE.json", {"stage": "query_crop", "binding": object_hash(source_binding),
@@ -70,23 +80,40 @@ class QueryCropTest(unittest.TestCase):
             model = Mock(dtype=torch.float32)
             model.prepare.return_value = {"image_grid_thw": torch.tensor([[1, 2, 4]])}
             model.encode.return_value = torch.zeros((2, 3))
-            model.generate.return_value = {"answer": "open", "generation_seconds": 0.1, "token_ids": [1]}
-            restorer = Mock(side_effect=lambda features, grid: (features + 1, torch.ones_like(features)))
+            def generate(batch, features):
+                token = int(features[0, 0])
+                return {"answer": "open" if token == 3 else "closed", "generation_seconds": 0.1, "token_ids": [token]}
+
+            model.generate.side_effect = generate
+            adapters = {
+                "S1a": lambda features, grid: (features + 1, torch.ones_like(features)),
+                "S1b": lambda features, grid: (features + 2, torch.ones_like(features)),
+                "A1": lambda features, grid: (features + 3, torch.ones_like(features)),
+            }
             scorer = Mock()
             scorer._compute_answer_scores.return_value = {"open": 1.0}
             scorer.answer_processor.side_effect = lambda text: text
             with patch("scripts.query_crop.paired_images", return_value=(None, lr4)), patch("torch.cuda.synchronize"):
-                result = predict_image(model, None, restorer, scorer, image, {}, root, output,
+                result = predict_image(model, None, adapters, scorer, image, {}, root, output,
                                        settings, proposals=crops["one"])
             self.assertFalse((output / "review-images").exists())
-            rows = {row["arm"]: row for row in result["rows"]}
-            self.assertEqual(set(rows), {"full", "query", "full_restore", "query_restore"})
-            self.assertEqual(rows["query_restore"]["crop_xyxy"], (0, 0, 40, 20))
-            self.assertEqual(rows["query_restore"]["visual_tokens"], rows["query"]["visual_tokens"])
-            report = summarize(result["rows"], {arm: LABELS[arm] for arm in rows},
+            rows = {(row["question_id"], row["arm"]): row for row in result["rows"]}
+            labels = {arm: arm for arm in ("full", "query")}
+            for variant, token in (("S1a", 1), ("S1b", 2), ("A1", 3)):
+                full, query = f"full_{variant}", f"query_{variant}"
+                labels.update({full: full, query: query})
+                self.assertEqual(rows[1, query]["crop_xyxy"], (0, 0, 40, 20))
+                self.assertEqual(rows[1, query]["visual_tokens"], rows[1, "query"]["visual_tokens"])
+                self.assertEqual(rows[1, query]["token_ids"], [token])
+                self.assertEqual(rows[2, query]["token_ids"], rows[2, full]["token_ids"])
+            report = summarize(result["rows"], labels,
                                {"split": "val_inner", "images": [image]}, result["selector_seconds"], 42)
             self.assertEqual(report["roi_only"]["questions"], 1)
-            self.assertEqual(model.generate.call_count, 4)
+            self.assertEqual(report["roi_only"]["accuracy_pct"]["query_A1"], 100)
+            self.assertIn(("query_S1a", "query_A1"),
+                          {(x["reference"], x["target"]) for x in report["roi_only"]["comparisons"]})
+            self.assertEqual(model.encode.call_count, 3)
+            self.assertEqual(model.generate.call_count, 12)
 
     def test_expat_preload_is_scoped_to_selector_child(self):
         with patch.dict(os.environ, {"LD_PRELOAD": "/old.so", "PYTHONPATH": "/wrong"}):
@@ -115,10 +142,10 @@ class QueryCropTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             out = Path(folder)
             with patch("scripts.query_crop.paired_images", return_value=(None, lr4)), patch("torch.cuda.synchronize"):
-                result = predict_image(model, None, None, scorer, image, {1: (2, "Other?")}, out, out,
+                result = predict_image(model, None, {}, scorer, image, {1: (2, "Other?")}, out, out,
                                        {"zoom": 1.5}, proposals=proposals)
                 with self.assertRaisesRegex(ValueError, "same LR4 pixels"):
-                    predict_image(model, None, None, scorer, image, {}, out, out, {"zoom": 1.5},
+                    predict_image(model, None, {}, scorer, image, {}, out, out, {"zoom": 1.5},
                                   proposals={**proposals, "lr4_sha256": "wrong"})
         rows = {row["arm"]: row for row in result["rows"]}
         self.assertEqual(result["selector_seconds"], 0.5)
@@ -159,7 +186,7 @@ class QueryCropTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             output = Path(folder)
             with patch("scripts.query_crop.paired_images", return_value=(clean, lr4)), patch("torch.cuda.synchronize"):
-                result = predict_image(model, selector, adapter, scorer, image, donors, output, output,
+                result = predict_image(model, selector, {"restore": adapter}, scorer, image, donors, output, output,
                                        {"crop_fraction": 0.6, "zoom": 1.5})
             selector.rank.assert_called_once_with(lr4, boxes, ["What is the highest number?", "What brand is this?"])
             self.assertEqual(model.prepare.call_count, 3)

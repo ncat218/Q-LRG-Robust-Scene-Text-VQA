@@ -26,7 +26,10 @@ def main():
     parser.add_argument("--sdrpn-libexpat", type=Path, help="Compatible libexpat.so.1, preloaded only for SD-RPN")
     parser.add_argument("--selector-cache", type=Path)
     parser.add_argument("--s1-run", type=Path)
-    parser.add_argument("--arm", choices=("S1a", "S1b"))
+    checkpoint_options = parser.add_mutually_exclusive_group()
+    checkpoint_options.add_argument("--arm", choices=("S1a", "S1b"))
+    checkpoint_options.add_argument("--arms", nargs="+", choices=("S1a", "S1b", "A1"),
+                                    help="Compare visual checkpoints in the same SD-RPN replay")
     parser.add_argument("--from-crop-run", type=Path, help="Reuse crops from a completed SD-RPN val_inner run")
     parser.add_argument("--split", choices=("val_inner", "official_val"))
     parser.add_argument("--images", type=int)
@@ -47,7 +50,7 @@ def main():
         parser.error("Launch from the UIT-HPC login node")
 
     sdrpn_options = ("sdrpn_env", "sdrpn_vendor", "sdrpn_checkpoint")
-    settings = ("data_dir", "env", "paths", "selector", "selector_cache", "s1_run", "arm", "split",
+    settings = ("data_dir", "env", "paths", "selector", "selector_cache", "s1_run", "arm", "arms", "split",
                 "images", "crop_fraction", "zoom", "seed", "from_crop_run", "sdrpn_libexpat", *sdrpn_options)
     if args.resume is not None:
         if any(getattr(args, name) is not None for name in settings):
@@ -57,9 +60,11 @@ def main():
         if Path(launch["repo"]) != REPO or (run_dir / "COMPLETE.json").exists():
             parser.error("Resume an unfinished run from its original checkout")
     elif args.from_crop_run is not None:
-        if args.s1_run is None or args.arm is None:
-            parser.error("--from-crop-run requires --s1-run and --arm")
-        if any(getattr(args, name) is not None for name in settings if name not in ("s1_run", "arm", "from_crop_run")):
+        if args.s1_run is None or (args.arm is None and args.arms is None):
+            parser.error("--from-crop-run requires --s1-run and either --arm or --arms")
+        if args.arms is not None and len(args.arms) != len(set(args.arms)):
+            parser.error("--arms requires distinct checkpoints")
+        if any(getattr(args, name) is not None for name in settings if name not in ("s1_run", "arm", "arms", "from_crop_run")):
             parser.error("--from-crop-run inherits the crop cohort, model environment and zoom")
         source = args.from_crop_run.resolve()
         if not all((source / name).is_file() for name in ("COMPLETE.json", "launch.json", "run.json", "predictions.jsonl")):
@@ -72,7 +77,11 @@ def main():
             "from_crop_run": str(source), "s1_run": str(args.s1_run.resolve()), "arm": args.arm,
             "time": args.time or "06:00:00",
         })
+        if args.arms is not None:
+            launch["arms"] = args.arms
     else:
+        if args.arms is not None:
+            parser.error("--arms requires --from-crop-run")
         if args.data_dir is None:
             parser.error("--data-dir is required")
         if (args.s1_run is None) != (args.arm is None):
@@ -122,9 +131,10 @@ def main():
     if launch["s1_run"] is not None:
         s1 = Path(launch["s1_run"]) / "s1"
         if replay:
-            arm_dir = s1 / "variants" / launch["arm"]
-            required.extend((s1 / "run.json", s1 / "train_manifest.json",
-                             arm_dir / "checkpoint.pt", arm_dir / "training.json"))
+            required.extend((s1 / "run.json", s1 / "train_manifest.json"))
+            for arm in launch.get("arms") or [launch["arm"]]:
+                arm_dir = s1 / "variants" / arm
+                required.extend((arm_dir / "checkpoint.pt", arm_dir / "training.json"))
         else:
             required.append(s1 / "COMPLETE.json")
     if launch.get("selector") == "sdrpn" and not replay:

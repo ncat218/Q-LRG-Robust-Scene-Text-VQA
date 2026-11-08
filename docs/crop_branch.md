@@ -51,6 +51,11 @@ python3 run_query_crop.py \
   --s1-run "$main/runs/s1-20261107T051836Z-wymhdtwk" --arm S1b
 ```
 
+Dùng `--arms S1a S1b A1` thay cho `--arm S1b` để so các checkpoint trong một job replay.
+S1a học khớp feature sạch, S1b học thêm từ đáp án và A1 là visual adapter chỉ học từ đáp án.
+Mỗi đầu vào chạy Qwen gốc và ba checkpoint trên cùng feature đầu vào. Cả ba giữ đủ token của crop.
+`summary.json` ghi SHA-256 từng checkpoint và CI ghép cặp giữa các checkpoint trên toàn ảnh, crop, và nhóm có crop thật.
+
 Kết quả nằm trong `runs/sdrpn-restore-…`. `summary.json` báo cáo cả tập và nhóm `roi_only` có crop thật, tách các ca quay về toàn ảnh. `review.html` tham chiếu ảnh xem trước đã lưu ở run SD-RPN nguồn. Giữ các đường dẫn tương đối của hai run khi tải cả HTML và ảnh về.
 
 Launcher submit ngay. SD-RPN ghi tọa độ và kết quả trong `runs/sdrpn-crop-…`, với một file đề xuất mỗi ảnh để hỗ trợ resume. Checkpoint và môi trường SD-RPN có sẵn được đọc tại chỗ. Lượt `--selector clip` ghi trong `runs/query-crop-…` và lấy checkpoint CLIP ghim revision khi cache trống (khoảng 605 MB). Có thể chuẩn bị cache CLIP tại node có mạng từ thư mục crop bằng lệnh:

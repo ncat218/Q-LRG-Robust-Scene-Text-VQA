@@ -5,6 +5,7 @@ import io
 import math
 import os
 import time
+from itertools import combinations
 from pathlib import Path
 from statistics import mean
 
@@ -35,8 +36,11 @@ LABELS = {
     "full_restore": "toàn ảnh LR4 + phục hồi latent",
     "query_restore": "cùng crop theo query + phục hồi latent",
 }
-PAIRS = (("full", "query"), ("shuffled", "query"), ("full", "full_restore"),
-         ("query", "query_restore"), ("full_restore", "query_restore"))
+VARIANT_LABELS = {
+    "S1a": "S1a (khớp feature sạch)",
+    "S1b": "S1b (khớp feature sạch và học từ đáp án)",
+    "A1": "A1 (visual adapter học từ đáp án)",
+}
 
 
 def candidate_boxes(size, fraction):
@@ -139,7 +143,7 @@ def select_box(boxes, scores):
 
 
 @torch.inference_mode()
-def predict_image(model, selector, adapter, scorer, image, donors, root, output, settings, proposals=None):
+def predict_image(model, selector, adapters, scorer, image, donors, root, output, settings, proposals=None):
     _, lr4 = paired_images(root, image)
     iid = image["image_id"]
     questions = image["questions"]
@@ -222,9 +226,11 @@ def predict_image(model, selector, adapter, scorer, image, donors, root, output,
                 "selector_donor_qid": donors[qid][0] if route == "shuffled" else None,
             }
             rows.append({"arm": route, **metadata, **result})
-            if adapter is not None and route in ("full", "query"):
+            if route == "shuffled":
+                continue
+            for variant, adapter in adapters.items():
                 if reuse:
-                    result, restore_seconds = restored_results[reuse]
+                    result, restore_seconds = restored_results[reuse, variant]
                 else:
                     start = time.perf_counter()
                     restored, _ = adapter(base, grid)
@@ -234,8 +240,8 @@ def predict_image(model, selector, adapter, scorer, image, donors, root, output,
                     torch.cuda.synchronize()
                     restore_seconds = time.perf_counter() - start
                     result = model.generate(batch, restored)
-                    restored_results[route] = (result, restore_seconds)
-                rows.append({"arm": route + "_restore", **metadata, **result, "restore_seconds": restore_seconds})
+                    restored_results[route, variant] = (result, restore_seconds)
+                rows.append({"arm": f"{route}_{variant}", **metadata, **result, "restore_seconds": restore_seconds})
     references = {q["question_id"]: scorer._compute_answer_scores(q["answers"]) for q in questions}
     for row in rows:
         row["score"] = references[row["question_id"]].get(scorer.answer_processor(row["answer"]), 0.0)
@@ -253,11 +259,24 @@ def summarize(rows, labels, manifest, selector_seconds, seed):
         raise ValueError("Unexpected prediction arms")
     groups = [iid for iid, _ in expected]
     scores = {arm: [row["score"] for row in predictions] for arm, predictions in by_arm.items()}
+    variants = [arm.removeprefix("query_") for arm in labels if arm.startswith("query_")]
+    pairs = [("full", "query"), ("shuffled", "query")]
+    for variant in variants:
+        full, crop = f"full_{variant}", f"query_{variant}"
+        pairs.extend((("full", full), ("query", crop), (full, crop)))
+        for raw, adapted in (("full", full), ("query", crop)):
+            if any((x["crop_xyxy"], x["grid_thw"], x["visual_tokens"]) !=
+                   (y["crop_xyxy"], y["grid_thw"], y["visual_tokens"])
+                   for x, y in zip(by_arm[raw], by_arm[adapted])):
+                raise ValueError(f"Input changed between {raw} and {adapted}")
+    for route in ("full", "query"):
+        pairs.extend(combinations((f"{route}_{variant}" for variant in variants), 2))
+    pairs = [(a, b) for a, b in pairs if a in labels and b in labels]
     comparisons = [
         {"reference": a, "target": b, **paired_bootstrap(scores[a], scores[b], groups, 10000, seed),
          "score_improved": sum(y > x for x, y in zip(scores[a], scores[b])),
          "score_worsened": sum(y < x for x, y in zip(scores[a], scores[b]))}
-        for a, b in PAIRS if a in labels and b in labels
+        for a, b in pairs
     ]
     summary = {
         "split": manifest["split"], "images": len(images), "questions": len(expected),
@@ -277,14 +296,18 @@ def summarize(rows, labels, manifest, selector_seconds, seed):
         summary["same_query_and_shuffled_boxes"] = sum(
             a["crop_xyxy"] == b["crop_xyxy"] for a, b in zip(by_arm["query"], by_arm["shuffled"])
         )
-    if "query_restore" in labels:
-        for raw, restored in (("full", "full_restore"), ("query", "query_restore")):
-            if any((x["crop_xyxy"], x["grid_thw"]) != (y["crop_xyxy"], y["grid_thw"])
-                   for x, y in zip(by_arm[raw], by_arm[restored])):
-                raise ValueError(f"Input changed between {raw} and {restored}")
-        full_gain = [y - x for x, y in zip(scores["full"], scores["full_restore"])]
-        crop_gain = [y - x for x, y in zip(scores["query"], scores["query_restore"])]
-        summary["restoration_gain_crop_minus_full"] = paired_bootstrap(full_gain, crop_gain, groups, 10000, seed)
+    if variants:
+        def gain_interactions(cohort_scores, cohort_groups):
+            results = {}
+            for variant in variants:
+                full_gain = [y - x for x, y in zip(cohort_scores["full"], cohort_scores[f"full_{variant}"])]
+                crop_gain = [y - x for x, y in zip(cohort_scores["query"], cohort_scores[f"query_{variant}"])]
+                results[variant] = paired_bootstrap(full_gain, crop_gain, cohort_groups, 10000, seed)
+            if variants == ["restore"]:
+                return {"restoration_gain_crop_minus_full": results["restore"]}
+            return {"gain_crop_minus_full_by_checkpoint": results}
+
+        summary.update(gain_interactions(scores, groups))
         selected = [i for i, row in enumerate(by_arm["query"]) if row.get("roi_selected") is True]
         if selected:
             roi_groups = [groups[i] for i in selected]
@@ -294,18 +317,16 @@ def summarize(rows, labels, manifest, selector_seconds, seed):
                 "accuracy_pct": {arm: 100 * mean(values) for arm, values in roi_scores.items()},
                 "comparisons": [
                     {"reference": a, "target": b, **paired_bootstrap(roi_scores[a], roi_scores[b], roi_groups, 10000, seed)}
-                    for a, b in PAIRS if a in labels and b in labels
+                    for a, b in pairs
                 ],
-                "restoration_gain_crop_minus_full": paired_bootstrap(
-                    [full_gain[i] for i in selected], [crop_gain[i] for i in selected], roi_groups, 10000, seed,
-                ),
+                **gain_interactions(roi_scores, roi_groups),
             }
     return summary
 
 
-def checkpoint_for(settings, shared, dataset_hashes):
+def checkpoints_for(settings, shared, dataset_hashes):
     if settings["s1_run"] is None:
-        return None
+        return {}
     output = Path(settings["s1_run"]) / "s1"
     replay = bool(settings.get("from_crop_run"))
     if not replay or (output / "COMPLETE.json").is_file():
@@ -322,25 +343,30 @@ def checkpoint_for(settings, shared, dataset_hashes):
         raise ValueError("S1 checkpoint model or audited inference environment differs")
     if trained.get("dataset_hashes") != dataset_hashes:
         raise ValueError("Use the expanded S1 run trained with the same split manifests")
-    arm = settings["arm"]
-    path = output / "variants" / arm / "checkpoint.pt"
-    digest = sha256(path)
-    checkpoint = torch.load(path, map_location="cpu", weights_only=True)
-    if checkpoint["arm"] != arm or checkpoint["binding"] != object_hash(trained) or sha256(path) != digest:
-        raise ValueError(f"Checkpoint does not belong to the selected S1 run: {path}")
     if replay:
         plan = read_json(output / "train_manifest.json")
         if object_hash(plan) != trained["train_manifest"]:
             raise ValueError("S1 training manifest does not match its binding")
         examples = sum(len(image["questions"]) for image in plan) * trained["config"]["epochs"]
         steps = math.ceil(examples / trained["config"]["accumulate"])
-        finished = read_json(path.with_name("training.json"))
-        history = checkpoint["history"]
-        if (checkpoint["examples"] != examples or finished["examples"] != examples or finished["steps"] != steps
-            or len(history) != steps or history[-1]["examples"] != examples or finished["history"] != history):
-            raise ValueError(f"{arm} does not have a verified final checkpoint")
-    return {"state": checkpoint["adapter"], "config": trained["config"],
-            "provenance": {"arm": arm, "sha256": digest, "s1_binding": checkpoint["binding"]}}
+    fingerprint = object_hash(trained)
+    checkpoints = {}
+    for arm in settings.get("arms") or [settings["arm"]]:
+        path = output / "variants" / arm / "checkpoint.pt"
+        digest = sha256(path)
+        checkpoint = torch.load(path, map_location="cpu", weights_only=True)
+        if checkpoint["arm"] != arm or checkpoint["binding"] != fingerprint or sha256(path) != digest:
+            raise ValueError(f"Checkpoint does not belong to the selected S1 run: {path}")
+        if replay:
+            finished = read_json(path.with_name("training.json"))
+            history = checkpoint["history"]
+            if (checkpoint["examples"] != examples or finished["examples"] != examples or finished["steps"] != steps
+                or len(history) != steps or not history or history[-1]["examples"] != examples
+                or finished["history"] != history):
+                raise ValueError(f"{arm} does not have a verified final checkpoint")
+        checkpoints[arm] = {"state": checkpoint["adapter"], "config": trained["config"],
+                            "provenance": {"arm": arm, "sha256": digest, "s1_binding": fingerprint}}
+    return checkpoints
 
 
 def run(output):
@@ -364,14 +390,22 @@ def run(output):
     donors = {} if replay else donor_questions(images, selected, settings["seed"])
     manifest = {**manifest, "images": selected}
     shared = runtime_shared(paths, config)
-    checkpoint = checkpoint_for(settings, shared, hashes)
-    labels = LABELS if checkpoint else {arm: LABELS[arm] for arm in ("full", "query", "shuffled")}
+    checkpoints = checkpoints_for(settings, shared, hashes)
+    multiple = bool(settings.get("arms"))
+    labels = {arm: LABELS[arm] for arm in ("full", "query")}
+    if not replay:
+        labels["shuffled"] = LABELS["shuffled"]
+    if multiple:
+        for arm in checkpoints:
+            labels[f"full_{arm}"] = f"toàn ảnh LR4 + {VARIANT_LABELS[arm]}"
+            labels[f"query_{arm}"] = f"cùng crop theo query + {VARIANT_LABELS[arm]}"
+    elif checkpoints:
+        labels.update({arm: LABELS[arm] for arm in ("full_restore", "query_restore")})
     use_sdrpn = settings.get("selector", "clip") == "sdrpn"
     if replay:
-        if checkpoint is None or not use_sdrpn:
-            raise ValueError("SD-RPN crop replay requires a restorer checkpoint")
+        if not checkpoints or not use_sdrpn:
+            raise ValueError("SD-RPN crop replay requires a visual checkpoint")
         crops, selector_binding, replay_binding = read_crops(Path(replay), output, settings, shared, hashes, selected)
-        labels = {arm: LABELS[arm] for arm in ("full", "query", "full_restore", "query_restore")}
     elif use_sdrpn:
         selector_binding = selector_provenance(settings, repo)
     else:
@@ -382,8 +416,10 @@ def run(output):
         "selector": selector_binding,
         "crop_code_sha256": sha256(Path(__file__)),
         "report_template_sha256": sha256(repo / "qlrg" / "case_review.html"),
-        "checkpoint": checkpoint["provenance"] if checkpoint else None,
+        "checkpoint": checkpoints[settings["arm"]]["provenance"] if checkpoints and not multiple else None,
     }
+    if multiple:
+        binding["checkpoints"] = {arm: checkpoint["provenance"] for arm, checkpoint in checkpoints.items()}
     if replay:
         binding["replay"] = replay_binding
     fingerprint = object_hash(binding)
@@ -407,11 +443,12 @@ def run(output):
             snapshot = selector_snapshot(settings["selector_cache"])
         model = Qwen(config, paths["hf_hub"])
         selector = None if use_sdrpn else ClipSelector(snapshot, model.device)
-        adapter = None
-        if checkpoint:
-            adapter = make_adapter(model, settings["arm"], checkpoint["config"])
+        adapters = {}
+        for arm, checkpoint in checkpoints.items():
+            adapter = make_adapter(model, arm, checkpoint["config"])
             adapter.load_state_dict(checkpoint["state"])
             adapter.eval()
+            adapters[arm if multiple else "restore"] = adapter
         scorer = evaluator()
         rows, selector_seconds = [], 0.0
         for index, image in enumerate(selected, start=1):
@@ -422,7 +459,7 @@ def run(output):
                     raise ValueError(f"Missing review preview for completed shard: {shard}")
             else:
                 roi = crops[image["image_id"]] if replay else (read_json(proposals / shard.name) if proposals else None)
-                batch = predict_image(model, selector, adapter, scorer, image, donors, paths["textvqa"], output,
+                batch = predict_image(model, selector, adapters, scorer, image, donors, paths["textvqa"], output,
                                       settings, proposals=roi)
                 write_json(shard, batch)
             rows.extend(batch["rows"])
@@ -431,6 +468,8 @@ def run(output):
                 print(f"Query crop: {index}/{len(selected)} images", flush=True)
         summary = summarize(rows, labels, manifest, selector_seconds, settings["seed"])
         summary["checkpoint"] = binding["checkpoint"]
+        if multiple:
+            summary["checkpoints"] = binding["checkpoints"]
         summary["selector"] = selector_binding["id"]
         if replay:
             summary["replay"] = replay_binding
