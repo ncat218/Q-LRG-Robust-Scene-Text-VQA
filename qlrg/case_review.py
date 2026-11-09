@@ -34,7 +34,9 @@ def write_case_review(path, predictions, labels, *, title, manifest=None, overla
         score = float(p["score"])
         if not 0 <= score <= 1:
             raise ValueError(f"Invalid TextVQA score for {qid}/{arm}: {score}")
-        total = math.prod(p["grid_thw"]) // 4 if p.get("grid_thw") else None
+        total = p.get("visual_tokens")
+        if total is None and p.get("grid_thw"):
+            total = math.prod(p["grid_thw"]) // 4
         fraction = p.get("mask_fraction")
         replaced = round(fraction * total) if total and fraction is not None else None
         r["arms"][arm] = [p["answer"], score, replaced, total]
@@ -92,6 +94,8 @@ def write_case_review(path, predictions, labels, *, title, manifest=None, overla
         defaults = ["A0", "S1b"]
     if crop_previews is not None and "full:query" in pairs:
         defaults = ["full", "query"]
+    if crop_previews is not None and "full:fusion" in pairs:
+        defaults = ["full", "fusion"]
     data = {
         "title": title, "labels": active, "defaults": defaults, "rows": list(rows.values()),
         "images": len({r["img"] for r in rows.values()}), "predictionCount": len(predictions),

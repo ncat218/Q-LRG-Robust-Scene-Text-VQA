@@ -506,6 +506,7 @@ def run(output):
     replay = settings.get("from_crop_run")
     ablation = bool(settings.get("crop_ablation"))
     stack = bool(settings.get("stack_s1b_a2"))
+    fusion = bool(settings.get("fair_fusion"))
     donors = {} if replay else donor_questions(images, selected, settings["seed"])
     manifest = {**manifest, "images": selected}
     shared = runtime_shared(paths, config)
@@ -516,7 +517,13 @@ def run(output):
     labels = {arm: LABELS[arm] for arm in ("full", "query")}
     if not replay:
         labels["shuffled"] = LABELS["shuffled"]
-    if ablation:
+    if fusion:
+        from scripts import crop_fusion
+
+        if not replay or ablation or stack or not multiple or set(checkpoints) != {"S1b"}:
+            raise ValueError("Fair fusion requires SD-RPN replay with S1b only")
+        labels = crop_fusion.FUSION_LABELS
+    elif ablation:
         if not replay or set(checkpoints) != {"A2"}:
             raise ValueError("Crop ablation requires SD-RPN replay with A2 only")
         labels = ABLATION_LABELS
@@ -541,6 +548,11 @@ def run(output):
         selector_binding = selector_provenance(settings, repo)
     else:
         selector_binding = {"id": SELECTOR_ID, "revision": SELECTOR_REVISION}
+    if fusion:
+        original_question_count = sum(len(image["questions"]) for image in selected)
+        selected = crop_fusion.select_fusion_cohort(selected, crops)
+        omitted = original_question_count - sum(len(image["questions"]) for image in selected)
+        manifest = {**manifest, "images": selected}
     binding = {
         "stage": "query_crop", "settings": settings, "shared": shared, "dataset_hashes": hashes,
         "selected_images": [image["image_id"] for image in selected],
@@ -553,6 +565,8 @@ def run(output):
         binding["checkpoints"] = {arm: checkpoint["provenance"] for arm, checkpoint in checkpoints.items()}
     if replay:
         binding["replay"] = replay_binding
+    if fusion:
+        binding["fusion_code_sha256"] = sha256(Path(crop_fusion.__file__))
     fingerprint = object_hash(binding)
     with FileLock(str(output / ".query-crop.lock"), timeout=0):
         state = output / "run.json"
@@ -572,7 +586,8 @@ def run(output):
         else:
             print(f"Loading selector {SELECTOR_ID} at {SELECTOR_REVISION} from {settings['selector_cache']}", flush=True)
             snapshot = selector_snapshot(settings["selector_cache"])
-        model = Qwen(config, paths["hf_hub"])
+        model_class = crop_fusion.FusionQwen if fusion else Qwen
+        model = model_class(config, paths["hf_hub"])
         selector = None if use_sdrpn else ClipSelector(snapshot, model.device)
         adapters = {}
         for arm, checkpoint in checkpoints.items():
@@ -581,7 +596,7 @@ def run(output):
             adapter.eval()
             adapters[arm if multiple else "restore"] = adapter
         scorer = evaluator()
-        rows, selector_seconds = [], 0.0
+        rows, selector_seconds, identity = [], 0.0, None
         for index, image in enumerate(selected, start=1):
             shard = output / "shards" / f"{object_hash(image['image_id'])[:24]}.json"
             if shard.is_file():
@@ -591,14 +606,23 @@ def run(output):
                     raise ValueError(f"Missing review preview for completed shard: {shard}")
             else:
                 roi = crops[image["image_id"]] if replay else (read_json(proposals / shard.name) if proposals else None)
-                batch = predict_image(model, selector, adapters, scorer, image, donors, paths["textvqa"], output,
-                                      settings, proposals=roi)
+                if fusion:
+                    batch = crop_fusion.predict_fusion_image(model, adapters["S1b"], scorer, image, roi,
+                                                            paths["textvqa"], output, check_identity=index == 1)
+                else:
+                    batch = predict_image(model, selector, adapters, scorer, image, donors, paths["textvqa"], output,
+                                          settings, proposals=roi)
                 write_json(shard, batch)
+            if batch.get("identity") is not None:
+                identity = batch["identity"]
             rows.extend(batch["rows"])
             selector_seconds += batch["selector_seconds"]
             if index % 50 == 0 or index == len(selected):
                 print(f"Query crop: {index}/{len(selected)} images", flush=True)
-        summary = summarize(rows, labels, manifest, selector_seconds, settings["seed"], ablation=ablation)
+        if fusion:
+            summary = crop_fusion.summarize_fusion(rows, manifest, settings["seed"], identity, omitted)
+        else:
+            summary = summarize(rows, labels, manifest, selector_seconds, settings["seed"], ablation=ablation)
         summary["checkpoint"] = binding["checkpoint"]
         if multiple:
             summary["checkpoints"] = binding["checkpoints"]
@@ -622,6 +646,8 @@ def run(output):
         title = "A2 · Zoom, padding và fallback · LR4" if ablation else "Crop theo query · LR4"
         if stack:
             title = "S1b + A2 · Toàn ảnh và crop nới 20% · LR4"
+        if fusion:
+            title = "Toàn ảnh + crop · Ngân sách 576 visual token · LR4"
         write_case_review(output / "review.html", rows, labels, title=title,
                           manifest=manifest, seed=settings["seed"], crop_previews=previews)
         artifacts = ("summary.json", "predictions.jsonl", "review.html")

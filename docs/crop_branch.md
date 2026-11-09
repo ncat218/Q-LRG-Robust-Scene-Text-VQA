@@ -89,6 +89,23 @@ Hai đầu vào là toàn ảnh LR4 và crop SD-RPN nới 20% mỗi phía với 
 Nhánh ghép dùng đúng feature đã sửa của S1b và chỉ gắn LoRA A2 trong lượt sinh đáp án.
 Đọc `summary.json` trong `runs/sdrpn-stack-…` để so bản ghép với A2 và S1b, trên cả tập và nhóm có crop thật.
 
+### Toàn ảnh và crop với cùng ngân sách visual token
+
+```bash
+python3 run_query_crop.py \
+  --from-crop-run "$crop/runs/sdrpn-crop-20261107T173143Z-heum7_b7" \
+  --s1-run "$main/runs/s1-20261107T051836Z-wymhdtwk" \
+  --arms S1b --fair-fusion
+```
+
+Chấm cùng các câu có crop thật. Mọi nhánh dùng đúng 576 visual token. Toàn ảnh riêng và crop riêng mỗi bên
+có hai mức tắt/bật S1b. Nhánh hai ảnh có 288 token toàn ảnh và 288 token crop, lần lượt thử tắt cả hai,
+chỉ phục hồi toàn ảnh, chỉ phục hồi crop và phục hồi cả hai. Crop dùng box SD-RPN nới 20% mỗi phía.
+Resize giữ tỷ lệ khung hình và thêm viền trung tính khi cần. Viền tính vào ngân sách và tỷ lệ vùng ảnh thật
+được báo cáo riêng. Qwen gốc dùng thứ tự toàn ảnh rồi crop, mỗi ảnh có grid riêng. Số token toàn prompt
+được báo cáo riêng vì nhánh hai ảnh có thêm dấu phân cách. Worker kiểm tra parity logit hai ảnh trước khi chấm.
+Kết quả nằm trong `runs/sdrpn-fusion-…`.
+
 Launcher submit ngay. SD-RPN ghi tọa độ và kết quả trong `runs/sdrpn-crop-…`, với một file đề xuất mỗi ảnh để hỗ trợ resume. Checkpoint và môi trường SD-RPN có sẵn được đọc tại chỗ. Lượt `--selector clip` ghi trong `runs/query-crop-…` và lấy checkpoint CLIP ghim revision khi cache trống (khoảng 605 MB). Có thể chuẩn bị cache CLIP tại node có mạng từ thư mục crop bằng lệnh:
 
 ```bash
