@@ -159,6 +159,48 @@ class QueryCropTest(unittest.TestCase):
             self.assertEqual(report["ablation"]["fallback_reasons"], {"tiny_crop": 1, "no_roi": 1})
             self.assertIn(("query", "nozoom"), {(r["reference"], r["target"]) for r in report["comparisons"]})
 
+            model.reset_mock()
+            restored = []
+
+            def restore(features, grid):
+                restored.append(features + 2)
+                return restored[-1], torch.ones_like(features)
+
+            def generate_stacked(batch, features):
+                base = features is model.encode.return_value
+                if not base:
+                    self.assertIs(features, restored[-1])
+                attached = isinstance(attention.q_proj, LoRALinear)
+                token = (0 if base else 2) + (1 if attached else 0)
+                return {"answer": "open" if token == 3 else "closed", "generation_seconds": 0.1, "token_ids": [token]}
+
+            model.generate.side_effect = generate_stacked
+            with patch("scripts.query_crop.paired_images", return_value=(None, lr4)), patch("torch.cuda.synchronize"):
+                stacked = predict_image(model, None, {"S1b": restore, "A2": adapters["A2"]}, scorer, image, {}, root,
+                                        output, {**settings, "stack_s1b_a2": True}, proposals=crops["one"])
+            stacked_rows = {(row["question_id"], row["arm"]): row for row in stacked["rows"]}
+            self.assertEqual(len(stacked_rows), 16)
+            for variant, token in (("", 0), ("_S1b", 2), ("_A2", 1), ("_S1b_A2", 3)):
+                row = stacked_rows[1, "query"+variant]
+                self.assertEqual(row["crop_xyxy"], rows[1, "pad20"]["crop_xyxy"])
+                self.assertEqual(row["input_size"], rows[1, "pad20"]["input_size"])
+                self.assertEqual(row["visual_tokens"], rows[1, "pad20"]["visual_tokens"])
+                self.assertEqual(row["token_ids"], [token])
+                self.assertEqual(stacked_rows[2, "query"+variant]["token_ids"],
+                                 stacked_rows[2, "full"+variant]["token_ids"])
+            self.assertEqual(model.encode.call_count, 3)
+            self.assertEqual(model.generate.call_count, 12)
+            self.assertEqual(len(restored), 3)
+            self.assertIs(attention.q_proj, query_proj)
+            self.assertIs(attention.v_proj, value_proj)
+            stack_labels = {arm: arm for arm in
+                            ("full", "query", "full_S1b", "query_S1b", "full_A2", "query_A2",
+                             "full_S1b_A2", "query_S1b_A2")}
+            report = summarize(stacked["rows"], stack_labels, {"split": "val_inner", "images": [image]}, 0, 42)
+            self.assertIn(("query_A2", "query_S1b_A2"),
+                          {(r["reference"], r["target"]) for r in report["roi_only"]["comparisons"]})
+            self.assertEqual(report["roi_only"]["s1b_a2_interaction_by_input"]["query"]["delta_pp"], 100)
+
     def test_crop_fallback_does_not_spend_tokens_on_a_crop_as_large_as_full(self):
         full = {"visual_tokens": 500}
         for tokens, reason in ((25, "tiny_crop"), (26, None), (499, None), (500, "no_token_saving")):

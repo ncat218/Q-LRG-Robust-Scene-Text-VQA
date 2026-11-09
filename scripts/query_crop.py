@@ -53,6 +53,7 @@ ABLATION_LABELS = {
 }
 PADDING = {"pad10": 0.1, "pad20": 0.2}
 MIN_CROP_TOKENS = 25
+STACK_ARM = "S1b_A2"
 
 
 def candidate_boxes(size, fraction):
@@ -178,6 +179,7 @@ def predict_image(model, selector, adapters, scorer, image, donors, root, output
     questions = image["questions"]
     replay = bool(settings.get("from_crop_run"))
     ablation = bool(settings.get("crop_ablation"))
+    stack = bool(settings.get("stack_s1b_a2"))
     if proposals is None:
         queries = [text for q in questions for text in (q["question"], donors[q["question_id"]][1])]
         boxes = candidate_boxes(lr4.size, settings["crop_fraction"])
@@ -226,14 +228,16 @@ def predict_image(model, selector, adapters, scorer, image, donors, root, output
                     raise ValueError(f"Out-of-bounds crop for question {qid}: {box}")
                 if route in PADDING:
                     box = padded_box(box, lr4.size, PADDING[route])
+                elif stack and route == "query":
+                    box = padded_box(box, lr4.size, PADDING["pad20"])
                 crop = lr4.crop(box)
                 zoom = 1.0 if route == "nozoom" else settings["zoom"]
                 scale = max(zoom, 28 / min(crop.size))
                 pixels = crop.resize(tuple(max(28, round(n * scale)) for n in crop.size), Image.Resampling.BICUBIC)
-                if replay and route == "query":
+                if replay and route == "query" and not stack:
                     preview = selection["preview"]
                 else:
-                    preview = save_preview(output, [qid, route], lr4, box, pixels)
+                    preview = save_preview(output, [qid, "pad20" if stack else route], lr4, box, pixels)
             reuse = None
             if route != "full" and selected_box is None:
                 reuse = "full"
@@ -257,7 +261,7 @@ def predict_image(model, selector, adapters, scorer, image, donors, root, output
                 result = None if ablation else model.generate(batch, base)
                 native_results[route] = (result, grid_thw, vision_seconds)
 
-            if replay and route == "query" and (
+            if replay and route == "query" and not stack and (
                 list(pixels.size) != selection["input_size"] or grid_thw != selection["grid_thw"]
             ):
                 raise ValueError(f"Replayed SD-RPN input changed for question {qid}")
@@ -297,6 +301,16 @@ def predict_image(model, selector, adapters, scorer, image, donors, root, output
                 rows.append(row)
                 if ablation:
                     ablation_rows[route] = row
+                if stack and variant == "S1b":
+                    if reuse:
+                        combined, restore_seconds = restored_results[reuse, STACK_ARM]
+                    else:
+                        # Reuse the same restored visual feature from the S1b-only arm.
+                        with adapters["A2"].attached():
+                            combined = model.generate(batch, restored)
+                        restored_results[route, STACK_ARM] = (combined, restore_seconds)
+                    rows.append({"arm": f"{route}_{STACK_ARM}", **metadata, **combined,
+                                 "restore_seconds": restore_seconds})
         if ablation:
             reason = fallback_reason(ablation_rows["query"], ablation_rows["full"])
             chosen = ablation_rows["full" if reason else "query"]
@@ -372,7 +386,16 @@ def summarize(rows, labels, manifest, selector_seconds, seed, ablation=False):
                 results[variant] = paired_bootstrap(full_gain, crop_gain, cohort_groups, 10000, seed)
             if variants == ["restore"]:
                 return {"restoration_gain_crop_minus_full": results["restore"]}
-            return {"gain_crop_minus_full_by_checkpoint": results}
+            interactions = {"gain_crop_minus_full_by_checkpoint": results}
+            if STACK_ARM in variants:
+                interactions["s1b_a2_interaction_by_input"] = {}
+                for route in ("full", "query"):
+                    s1b_gain = [y - x for x, y in zip(cohort_scores[route], cohort_scores[f"{route}_S1b"])]
+                    stacked_gain = [y - x for x, y in zip(cohort_scores[f"{route}_A2"],
+                                                         cohort_scores[f"{route}_{STACK_ARM}"])]
+                    interactions["s1b_a2_interaction_by_input"][route] = paired_bootstrap(
+                        s1b_gain, stacked_gain, cohort_groups, 10000, seed)
+            return interactions
 
         summary.update(gain_interactions(scores, groups))
         selected = [i for i, row in enumerate(by_arm["query"]) if row.get("roi_selected") is True]
@@ -482,11 +505,14 @@ def run(output):
         selected = sorted(images, key=lambda row: rank(settings["seed"], row["image_id"]))[:settings["images"]]
     replay = settings.get("from_crop_run")
     ablation = bool(settings.get("crop_ablation"))
+    stack = bool(settings.get("stack_s1b_a2"))
     donors = {} if replay else donor_questions(images, selected, settings["seed"])
     manifest = {**manifest, "images": selected}
     shared = runtime_shared(paths, config)
     checkpoints = checkpoints_for(settings, shared, hashes)
     multiple = bool(settings.get("arms"))
+    if stack and (not replay or ablation or not multiple or set(checkpoints) != {"S1b", "A2"}):
+        raise ValueError("Stack evaluation requires SD-RPN replay with S1b and A2")
     labels = {arm: LABELS[arm] for arm in ("full", "query")}
     if not replay:
         labels["shuffled"] = LABELS["shuffled"]
@@ -495,9 +521,15 @@ def run(output):
             raise ValueError("Crop ablation requires SD-RPN replay with A2 only")
         labels = ABLATION_LABELS
     elif multiple:
+        crop_label = "crop SD-RPN nới 20%" if stack else "cùng crop theo query"
+        if stack:
+            labels["query"] = f"{crop_label}, Qwen gốc"
         for arm in checkpoints:
             labels[f"full_{arm}"] = f"toàn ảnh LR4 + {VARIANT_LABELS[arm]}"
-            labels[f"query_{arm}"] = f"cùng crop theo query + {VARIANT_LABELS[arm]}"
+            labels[f"query_{arm}"] = f"{crop_label} + {VARIANT_LABELS[arm]}"
+        if stack:
+            labels[f"full_{STACK_ARM}"] = "toàn ảnh LR4 + S1b phục hồi latent + LoRA A2"
+            labels[f"query_{STACK_ARM}"] = f"{crop_label} + S1b phục hồi latent + LoRA A2"
     elif checkpoints:
         labels.update({arm: LABELS[arm] for arm in ("full_restore", "query_restore")})
     use_sdrpn = settings.get("selector", "clip") == "sdrpn"
@@ -573,6 +605,9 @@ def run(output):
         summary["selector"] = selector_binding["id"]
         if replay:
             summary["replay"] = replay_binding
+        if stack:
+            summary["stack"] = {"restorer": "S1b", "language_lora": "A2",
+                                "crop_padding_per_side": PADDING["pad20"], "crop_zoom": settings["zoom"]}
         summary["no_roi_fallbacks"] = {
             arm: sum(r["arm"] == arm and r["roi_selected"] is False for r in rows)
             for arm in ("query", "shuffled") if arm in labels
@@ -585,6 +620,8 @@ def run(output):
             available = {path for path in set(previews.values()) if (output / path).is_file()}
             previews = {key: path for key, path in previews.items() if path in available}
         title = "A2 · Zoom, padding và fallback · LR4" if ablation else "Crop theo query · LR4"
+        if stack:
+            title = "S1b + A2 · Toàn ảnh và crop nới 20% · LR4"
         write_case_review(output / "review.html", rows, labels, title=title,
                           manifest=manifest, seed=settings["seed"], crop_previews=previews)
         artifacts = ("summary.json", "predictions.jsonl", "review.html")

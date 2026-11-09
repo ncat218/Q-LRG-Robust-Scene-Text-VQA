@@ -75,6 +75,20 @@ tối thiểu và image processor như các nhánh còn lại. Luật fallback c
 Giữ toàn bộ token đầu vào ở mọi nhánh. Đọc điểm, CI, số token và lý do fallback trong `summary.json` của
 `runs/sdrpn-ablation-…`. `review.html` dùng cả ảnh xem trước mới và ảnh của run nguồn.
 
+### Ghép S1b và LoRA A2
+
+```bash
+python3 run_query_crop.py \
+  --from-crop-run "$crop/runs/sdrpn-crop-20261107T173143Z-heum7_b7" \
+  --s1-run "$main/runs/s1-20261107T051836Z-wymhdtwk" \
+  --arms S1b A2 --stack-s1b-a2
+```
+
+Job dùng checkpoint đã train của S1b và A2, rồi chạy Qwen gốc, S1b, A2 và S1b + A2 trên từng đầu vào.
+Hai đầu vào là toàn ảnh LR4 và crop SD-RPN nới 20% mỗi phía với mức zoom gốc, như nhánh pad20.
+Nhánh ghép dùng đúng feature đã sửa của S1b và chỉ gắn LoRA A2 trong lượt sinh đáp án.
+Đọc `summary.json` trong `runs/sdrpn-stack-…` để so bản ghép với A2 và S1b, trên cả tập và nhóm có crop thật.
+
 Launcher submit ngay. SD-RPN ghi tọa độ và kết quả trong `runs/sdrpn-crop-…`, với một file đề xuất mỗi ảnh để hỗ trợ resume. Checkpoint và môi trường SD-RPN có sẵn được đọc tại chỗ. Lượt `--selector clip` ghi trong `runs/query-crop-…` và lấy checkpoint CLIP ghim revision khi cache trống (khoảng 605 MB). Có thể chuẩn bị cache CLIP tại node có mạng từ thư mục crop bằng lệnh:
 
 ```bash
