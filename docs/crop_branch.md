@@ -59,6 +59,22 @@ Mỗi đầu vào chạy Qwen gốc và bốn checkpoint trên cùng feature đ�
 
 Kết quả nằm trong `runs/sdrpn-restore-…`. `summary.json` báo cáo cả tập và nhóm `roi_only` có crop thật, tách các ca quay về toàn ảnh. `review.html` tham chiếu ảnh xem trước đã lưu ở run SD-RPN nguồn. Giữ các đường dẫn tương đối của hai run khi tải cả HTML và ảnh về.
 
+### Kiểm tra zoom, padding và fallback
+
+```bash
+python3 run_query_crop.py \
+  --from-crop-run "$crop/runs/sdrpn-crop-20261107T173143Z-heum7_b7" \
+  --s1-run "$main/runs/s1-20261107T051836Z-wymhdtwk" \
+  --arms A2 --crop-ablation
+```
+
+Một job so A2 trên toàn ảnh, crop gốc, cùng crop bỏ phóng thêm, crop nới 10% và 20% mỗi phía, và luật fallback.
+Box nới lấy pixel từ ảnh LR4, giới hạn ở biên ảnh và giữ mức zoom gốc. Nhánh bỏ phóng thêm vẫn dùng kích thước
+tối thiểu và image processor như các nhánh còn lại. Luật fallback chọn toàn ảnh khi thiếu ROI, crop còn tối đa
+25 token hoặc crop dùng ít nhất bằng số token của toàn ảnh. Nhánh này dùng dự đoán trong cùng job.
+Giữ toàn bộ token đầu vào ở mọi nhánh. Đọc điểm, CI, số token và lý do fallback trong `summary.json` của
+`runs/sdrpn-ablation-…`. `review.html` dùng cả ảnh xem trước mới và ảnh của run nguồn.
+
 Launcher submit ngay. SD-RPN ghi tọa độ và kết quả trong `runs/sdrpn-crop-…`, với một file đề xuất mỗi ảnh để hỗ trợ resume. Checkpoint và môi trường SD-RPN có sẵn được đọc tại chỗ. Lượt `--selector clip` ghi trong `runs/query-crop-…` và lấy checkpoint CLIP ghim revision khi cache trống (khoảng 605 MB). Có thể chuẩn bị cache CLIP tại node có mạng từ thư mục crop bằng lệnh:
 
 ```bash

@@ -14,7 +14,10 @@ from qlrg.case_review import write_case_review
 from qlrg.common import object_hash, sha256, write_json, write_jsonl
 from qlrg.s1_model import LanguageLoRA, LoRALinear
 from scripts.crop_replay import read_crops
-from scripts.query_crop import LABELS, candidate_boxes, checkpoints_for, donor_questions, predict_image, summarize
+from scripts.query_crop import (
+    ABLATION_LABELS, LABELS, candidate_boxes, checkpoints_for, donor_questions, fallback_reason,
+    predict_image, summarize,
+)
 from scripts.sdrpn_runtime import selector_environment
 
 
@@ -133,6 +136,33 @@ class QueryCropTest(unittest.TestCase):
             self.assertIs(attention.v_proj, value_proj)
             self.assertEqual(model.encode.call_count, 3)
             self.assertEqual(model.generate.call_count, 15)
+
+            model.reset_mock()
+            with patch("scripts.query_crop.paired_images", return_value=(None, lr4)), patch("torch.cuda.synchronize"):
+                ablation = predict_image(model, None, {"A2": adapters["A2"]}, scorer, image, {}, root, output,
+                                         {**settings, "crop_ablation": True}, proposals=crops["one"])
+            rows = {(row["question_id"], row["arm"]): row for row in ablation["rows"]}
+            self.assertEqual(len(rows), 12)
+            self.assertEqual(rows[1, "query"]["input_size"], (60, 30))
+            self.assertEqual(rows[1, "nozoom"]["input_size"], (56, 28))
+            self.assertEqual(rows[1, "nozoom"]["crop_xyxy"], rows[1, "query"]["crop_xyxy"])
+            self.assertEqual(rows[1, "pad10"]["crop_xyxy"], (0, 0, 44, 22))
+            self.assertEqual(rows[1, "pad20"]["crop_xyxy"], (0, 0, 48, 24))
+            self.assertEqual(rows[1, "fallback"]["fallback_reason"], "tiny_crop")
+            self.assertEqual(rows[1, "fallback"]["crop_xyxy"], rows[1, "full"]["crop_xyxy"])
+            self.assertEqual(rows[2, "fallback"]["fallback_reason"], "no_roi")
+            self.assertEqual(model.encode.call_count, 6)
+            self.assertEqual(model.generate.call_count, 6)
+            report = summarize(ablation["rows"], ABLATION_LABELS, {"split": "val_inner", "images": [image]},
+                               ablation["selector_seconds"], 42, ablation=True)
+            self.assertEqual(report["roi_only"]["questions"], 1)
+            self.assertEqual(report["ablation"]["fallback_reasons"], {"tiny_crop": 1, "no_roi": 1})
+            self.assertIn(("query", "nozoom"), {(r["reference"], r["target"]) for r in report["comparisons"]})
+
+    def test_crop_fallback_does_not_spend_tokens_on_a_crop_as_large_as_full(self):
+        full = {"visual_tokens": 500}
+        for tokens, reason in ((25, "tiny_crop"), (26, None), (499, None), (500, "no_token_saving")):
+            self.assertEqual(fallback_reason({"roi_selected": True, "visual_tokens": tokens}, full), reason)
 
     def test_expat_preload_is_scoped_to_selector_child(self):
         with patch.dict(os.environ, {"LD_PRELOAD": "/old.so", "PYTHONPATH": "/wrong"}):

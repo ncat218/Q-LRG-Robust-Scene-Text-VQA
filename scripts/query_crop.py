@@ -5,6 +5,7 @@ import io
 import math
 import os
 import time
+from collections import Counter
 from itertools import combinations
 from pathlib import Path
 from statistics import mean
@@ -42,6 +43,16 @@ VARIANT_LABELS = {
     "A1": "A1 (visual adapter học từ đáp án)",
     "A2": "A2 (LoRA Q/V trong LLM, học từ đáp án)",
 }
+ABLATION_LABELS = {
+    "full": "A2 trên toàn ảnh LR4",
+    "query": "A2 trên crop SD-RPN, phóng theo cấu hình gốc",
+    "nozoom": "A2 trên cùng crop SD-RPN, không phóng thêm",
+    "pad10": "A2 trên crop SD-RPN nới 10% mỗi phía",
+    "pad20": "A2 trên crop SD-RPN nới 20% mỗi phía",
+    "fallback": "A2 với crop gốc hoặc toàn ảnh theo ngưỡng token",
+}
+PADDING = {"pad10": 0.1, "pad20": 0.2}
+MIN_CROP_TOKENS = 25
 
 
 def candidate_boxes(size, fraction):
@@ -143,12 +154,30 @@ def select_box(boxes, scores):
     return boxes[index], scores[index]
 
 
+def padded_box(box, size, fraction):
+    x0, y0, x1, y1 = box
+    dx = math.ceil(fraction * (x1 - x0))
+    dy = math.ceil(fraction * (y1 - y0))
+    return max(0, x0 - dx), max(0, y0 - dy), min(size[0], x1 + dx), min(size[1], y1 + dy)
+
+
+def fallback_reason(crop, full):
+    if not crop["roi_selected"]:
+        return "no_roi"
+    if crop["visual_tokens"] <= MIN_CROP_TOKENS:
+        return "tiny_crop"
+    if crop["visual_tokens"] >= full["visual_tokens"]:
+        return "no_token_saving"
+    return None
+
+
 @torch.inference_mode()
 def predict_image(model, selector, adapters, scorer, image, donors, root, output, settings, proposals=None):
     _, lr4 = paired_images(root, image)
     iid = image["image_id"]
     questions = image["questions"]
     replay = bool(settings.get("from_crop_run"))
+    ablation = bool(settings.get("crop_ablation"))
     if proposals is None:
         queries = [text for q in questions for text in (q["question"], donors[q["question_id"]][1])]
         boxes = candidate_boxes(lr4.size, settings["crop_fraction"])
@@ -174,15 +203,19 @@ def predict_image(model, selector, adapters, scorer, image, donors, root, output
             raise ValueError(f"SD-RPN proposal coverage differs for {iid}")
     full_preview = proposals["full_preview"] if replay else save_preview(output, [iid, "full"], lr4)
     full_box = (0, 0, *lr4.size)
+    routes = ("full", "query") if replay else ("full", "query", "shuffled")
+    if ablation:
+        routes += ("nozoom", *PADDING)
     rows = []
     for question in questions:
         qid, text = question["question_id"], question["question"]
         selections = regions[str(qid)]
         native_results = {}
         restored_results = {}
-        zoom = settings["zoom"]
-        for route in (("full", "query") if replay else ("full", "query", "shuffled")):
-            selection = selections[route] if route != "full" else {}
+        seen_inputs = {}
+        ablation_rows = {}
+        for route in routes:
+            selection = {} if route == "full" else selections["query" if ablation else route]
             selected_box = selection.get("box")
             box = tuple(selected_box) if selected_box is not None else full_box
             if selected_box is None:
@@ -191,15 +224,26 @@ def predict_image(model, selector, adapters, scorer, image, donors, root, output
                 x0, y0, x1, y1 = box
                 if not (0 <= x0 < x1 <= lr4.width and 0 <= y0 < y1 <= lr4.height):
                     raise ValueError(f"Out-of-bounds crop for question {qid}: {box}")
+                if route in PADDING:
+                    box = padded_box(box, lr4.size, PADDING[route])
                 crop = lr4.crop(box)
+                zoom = 1.0 if route == "nozoom" else settings["zoom"]
                 scale = max(zoom, 28 / min(crop.size))
                 pixels = crop.resize(tuple(max(28, round(n * scale)) for n in crop.size), Image.Resampling.BICUBIC)
-                preview = selection["preview"] if replay else save_preview(output, [qid, route], lr4, box, pixels)
+                if replay and route == "query":
+                    preview = selection["preview"]
+                else:
+                    preview = save_preview(output, [qid, route], lr4, box, pixels)
             reuse = None
             if route != "full" and selected_box is None:
                 reuse = "full"
             elif route == "shuffled" and selected_box == selections["query"]["box"]:
                 reuse = "query"
+            if ablation and reuse is None:
+                geometry = (box, pixels.size)
+                reuse = seen_inputs.get(geometry)
+                if reuse is None:
+                    seen_inputs[geometry] = route
             if reuse:
                 result, grid_thw, vision_seconds = native_results[reuse]
             else:
@@ -210,7 +254,7 @@ def predict_image(model, selector, adapters, scorer, image, donors, root, output
                 base = model.encode(batch)
                 torch.cuda.synchronize()
                 vision_seconds = time.perf_counter() - start
-                result = model.generate(batch, base)
+                result = None if ablation else model.generate(batch, base)
                 native_results[route] = (result, grid_thw, vision_seconds)
 
             if replay and route == "query" and (
@@ -226,7 +270,8 @@ def predict_image(model, selector, adapters, scorer, image, donors, root, output
                 "foreground_tokens": selection.get("foreground_tokens"),
                 "selector_donor_qid": donors[qid][0] if route == "shuffled" else None,
             }
-            rows.append({"arm": route, **metadata, **result})
+            if not ablation:
+                rows.append({"arm": route, **metadata, **result})
             if route == "shuffled":
                 continue
             for variant, adapter in adapters.items():
@@ -247,14 +292,22 @@ def predict_image(model, selector, adapters, scorer, image, donors, root, output
                         restore_seconds = time.perf_counter() - start
                         result = model.generate(batch, restored)
                     restored_results[route, variant] = (result, restore_seconds)
-                rows.append({"arm": f"{route}_{variant}", **metadata, **result, "restore_seconds": restore_seconds})
+                arm = route if ablation else f"{route}_{variant}"
+                row = {"arm": arm, **metadata, **result, "restore_seconds": restore_seconds}
+                rows.append(row)
+                if ablation:
+                    ablation_rows[route] = row
+        if ablation:
+            reason = fallback_reason(ablation_rows["query"], ablation_rows["full"])
+            chosen = ablation_rows["full" if reason else "query"]
+            rows.append({**chosen, "arm": "fallback", "fallback_reason": reason})
     references = {q["question_id"]: scorer._compute_answer_scores(q["answers"]) for q in questions}
     for row in rows:
         row["score"] = references[row["question_id"]].get(scorer.answer_processor(row["answer"]), 0.0)
     return {"rows": rows, "selector_seconds": selector_seconds}
 
 
-def summarize(rows, labels, manifest, selector_seconds, seed):
+def summarize(rows, labels, manifest, selector_seconds, seed, ablation=False):
     images = manifest["images"]
     expected = [(im["image_id"], q["question_id"]) for im in images for q in im["questions"]]
     by_arm = {arm: [row for row in rows if row["arm"] == arm] for arm in labels}
@@ -267,6 +320,12 @@ def summarize(rows, labels, manifest, selector_seconds, seed):
     scores = {arm: [row["score"] for row in predictions] for arm, predictions in by_arm.items()}
     variants = [arm.removeprefix("query_") for arm in labels if arm.startswith("query_")]
     pairs = [("full", "query"), ("shuffled", "query")]
+    if ablation:
+        for target in ("nozoom", *PADDING, "fallback"):
+            pairs.extend((("query", target), ("full", target)))
+        pairs.append(("pad10", "pad20"))
+        if any(a["crop_xyxy"] != b["crop_xyxy"] for a, b in zip(by_arm["query"], by_arm["nozoom"])):
+            raise ValueError("The zoom control must use the original crop box")
     for variant in variants:
         full, crop = f"full_{variant}", f"query_{variant}"
         pairs.extend((("full", full), ("query", crop), (full, crop)))
@@ -302,8 +361,10 @@ def summarize(rows, labels, manifest, selector_seconds, seed):
         summary["same_query_and_shuffled_boxes"] = sum(
             a["crop_xyxy"] == b["crop_xyxy"] for a, b in zip(by_arm["query"], by_arm["shuffled"])
         )
-    if variants:
+    if variants or ablation:
         def gain_interactions(cohort_scores, cohort_groups):
+            if not variants:
+                return {}
             results = {}
             for variant in variants:
                 full_gain = [y - x for x, y in zip(cohort_scores["full"], cohort_scores[f"full_{variant}"])]
@@ -321,11 +382,38 @@ def summarize(rows, labels, manifest, selector_seconds, seed):
             summary["roi_only"] = {
                 "questions": len(selected), "images": len(set(roi_groups)),
                 "accuracy_pct": {arm: 100 * mean(values) for arm, values in roi_scores.items()},
+                "mean_visual_tokens": {
+                    arm: mean(values[i]["visual_tokens"] for i in selected) for arm, values in by_arm.items()
+                },
                 "comparisons": [
                     {"reference": a, "target": b, **paired_bootstrap(roi_scores[a], roi_scores[b], roi_groups, 10000, seed)}
                     for a, b in pairs
                 ],
                 **gain_interactions(roi_scores, roi_groups),
+            }
+    if ablation:
+        summary["ablation"] = {
+            "padding_per_side": PADDING, "fallback_tiny_max_tokens": MIN_CROP_TOKENS,
+            "fallback_full_at_or_above_full_tokens": True,
+            "fallback_reasons": dict(Counter(r["fallback_reason"] or "use_crop" for r in by_arm["fallback"])),
+            "zoom_changed_input_size": sum(a["input_size"] != b["input_size"]
+                                           for a, b in zip(by_arm["query"], by_arm["nozoom"])),
+            "zoom_changed_grid": sum(a["grid_thw"] != b["grid_thw"]
+                                     for a, b in zip(by_arm["query"], by_arm["nozoom"])),
+        }
+        whole_box = [
+            i for i, (full, query) in enumerate(zip(by_arm["full"], by_arm["query"]))
+            if query["roi_selected"] and full["crop_xyxy"] == query["crop_xyxy"]
+        ]
+        if whole_box:
+            summary["whole_image_box_zoom_control"] = {
+                "questions": len(whole_box),
+                "accuracy_pct": {arm: 100 * mean(scores[arm][i] for i in whole_box)
+                                 for arm in ("full", "query", "nozoom")},
+                "query_vs_nozoom": paired_bootstrap(
+                    [scores["query"][i] for i in whole_box], [scores["nozoom"][i] for i in whole_box],
+                    [groups[i] for i in whole_box], 10000, seed,
+                ),
             }
     return summary
 
@@ -393,6 +481,7 @@ def run(output):
     if settings["images"] is not None:
         selected = sorted(images, key=lambda row: rank(settings["seed"], row["image_id"]))[:settings["images"]]
     replay = settings.get("from_crop_run")
+    ablation = bool(settings.get("crop_ablation"))
     donors = {} if replay else donor_questions(images, selected, settings["seed"])
     manifest = {**manifest, "images": selected}
     shared = runtime_shared(paths, config)
@@ -401,7 +490,11 @@ def run(output):
     labels = {arm: LABELS[arm] for arm in ("full", "query")}
     if not replay:
         labels["shuffled"] = LABELS["shuffled"]
-    if multiple:
+    if ablation:
+        if not replay or set(checkpoints) != {"A2"}:
+            raise ValueError("Crop ablation requires SD-RPN replay with A2 only")
+        labels = ABLATION_LABELS
+    elif multiple:
         for arm in checkpoints:
             labels[f"full_{arm}"] = f"toàn ảnh LR4 + {VARIANT_LABELS[arm]}"
             labels[f"query_{arm}"] = f"cùng crop theo query + {VARIANT_LABELS[arm]}"
@@ -461,7 +554,8 @@ def run(output):
             shard = output / "shards" / f"{object_hash(image['image_id'])[:24]}.json"
             if shard.is_file():
                 batch = read_json(shard)
-                if not replay and any(not (output / row["preview"]).is_file() for row in batch["rows"]):
+                if any(not (output / row["preview"]).is_file() for row in batch["rows"]
+                       if not replay or Path(row["preview"]).parent == Path("review-images")):
                     raise ValueError(f"Missing review preview for completed shard: {shard}")
             else:
                 roi = crops[image["image_id"]] if replay else (read_json(proposals / shard.name) if proposals else None)
@@ -472,7 +566,7 @@ def run(output):
             selector_seconds += batch["selector_seconds"]
             if index % 50 == 0 or index == len(selected):
                 print(f"Query crop: {index}/{len(selected)} images", flush=True)
-        summary = summarize(rows, labels, manifest, selector_seconds, settings["seed"])
+        summary = summarize(rows, labels, manifest, selector_seconds, settings["seed"], ablation=ablation)
         summary["checkpoint"] = binding["checkpoint"]
         if multiple:
             summary["checkpoints"] = binding["checkpoints"]
@@ -490,7 +584,8 @@ def run(output):
         if replay:
             available = {path for path in set(previews.values()) if (output / path).is_file()}
             previews = {key: path for key, path in previews.items() if path in available}
-        write_case_review(output / "review.html", rows, labels, title="Crop theo query · LR4",
+        title = "A2 · Zoom, padding và fallback · LR4" if ablation else "Crop theo query · LR4"
+        write_case_review(output / "review.html", rows, labels, title=title,
                           manifest=manifest, seed=settings["seed"], crop_previews=previews)
         artifacts = ("summary.json", "predictions.jsonl", "review.html")
         write_json(complete, {"stage": "query_crop", "binding": fingerprint,
