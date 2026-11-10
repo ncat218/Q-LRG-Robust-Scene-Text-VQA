@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from contextlib import nullcontext
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -7,7 +8,7 @@ import torch
 from PIL import Image
 
 from scripts.crop_fusion import (
-    FUSION_LABELS, TOTAL_TOKENS, VIEW_TOKENS, fit_token_canvas, predict_fusion_image,
+    FALLBACK_ARM, FUSION_ALL_LABELS, FUSION_LABELS, TOTAL_TOKENS, VIEW_TOKENS, fit_token_canvas, predict_fusion_image,
     select_fusion_cohort, summarize_fusion,
 )
 
@@ -71,3 +72,29 @@ class CropFusionTest(unittest.TestCase):
             self.assertEqual(report["excluded_no_roi_questions"], 1)
             self.assertTrue(report["identity"]["logits_exact"])
             self.assertEqual(report["visual_budget"]["total"], 576)
+
+            model.reset_mock()
+            model.encode_views.side_effect = [
+                (torch.full((576, 3), 1.0),), (torch.full((576, 3), 2.0),),
+                (torch.full((288, 3), 1.0), torch.full((288, 3), 2.0)), (torch.full((576, 3), 1.0),),
+            ]
+            lora = Mock()
+            lora.attached.side_effect = nullcontext
+            with patch("scripts.crop_fusion.paired_images", return_value=(None, lr4)), patch("torch.cuda.synchronize"):
+                result = predict_fusion_image(model, adapter, scorer, image, proposals, output, output, True, lora)
+            fallback = {row["arm"]: row for row in result["rows"] if row["question_id"] == 2}
+            self.assertEqual(fallback.keys(), FUSION_ALL_LABELS.keys())
+            for arm, source in FALLBACK_ARM.items():
+                self.assertEqual(fallback[arm]["token_ids"], fallback[source]["token_ids"])
+                self.assertEqual(fallback[arm]["visual_tokens"], 576)
+                self.assertEqual(fallback[arm]["fallback_reason"], "no_roi")
+            self.assertEqual(lora.attached.call_count, 2)
+            self.assertEqual(model.encode_views.call_count, 4)
+            self.assertEqual(model.generate.call_count, 12)
+            report = summarize_fusion(result["rows"], {"images": [image], "split": "val_inner"}, 42,
+                                      result["identity"], 0, include_a2=True)
+            self.assertEqual(report["questions"], 2)
+            self.assertEqual(report["fallback_questions"], 1)
+            self.assertEqual(report["roi_only"]["questions"], 1)
+            self.assertIn(("full_A2", "fusion"),
+                          {(r["reference"], r["target"]) for r in report["comparisons"]})

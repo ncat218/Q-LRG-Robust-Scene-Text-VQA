@@ -106,6 +106,12 @@ Resize giữ tỷ lệ khung hình và thêm viền trung tính khi cần. Viề
 được báo cáo riêng vì nhánh hai ảnh có thêm dấu phân cách. Worker kiểm tra parity logit hai ảnh trước khi chấm.
 Kết quả nằm trong `runs/sdrpn-fusion-…`.
 
+Để chấm cùng tập 3.473 câu của S1, dùng `--arms S1b A2 --fair-fusion-all` thay cho hai cờ trên.
+Ở các câu thiếu ROI, nhánh crop và fusion dùng toàn ảnh với 576 visual token. S1b chỉ chạy trên
+toàn ảnh nếu cấu hình yêu cầu phục hồi toàn ảnh hoặc phục hồi toàn bộ đầu vào. Nhánh chỉ phục hồi crop
+giữ nguyên feature khi phải quay về toàn ảnh. A2 toàn ảnh được chấm cùng 576 token.
+Bảng chính gồm toàn bộ câu, còn `roi_only` giữ phép so phụ trên các câu có crop.
+
 Launcher submit ngay. SD-RPN ghi tọa độ và kết quả trong `runs/sdrpn-crop-…`, với một file đề xuất mỗi ảnh để hỗ trợ resume. Checkpoint và môi trường SD-RPN có sẵn được đọc tại chỗ. Lượt `--selector clip` ghi trong `runs/query-crop-…` và lấy checkpoint CLIP ghim revision khi cache trống (khoảng 605 MB). Có thể chuẩn bị cache CLIP tại node có mạng từ thư mục crop bằng lệnh:
 
 ```bash

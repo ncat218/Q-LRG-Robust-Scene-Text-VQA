@@ -38,6 +38,8 @@ def main():
                                 help="Evaluate S1b + A2 on full images and SD-RPN crops padded by 20%%")
     replay_options.add_argument("--fair-fusion", action="store_true", default=None,
                                 help="Compare full, crop and full plus crop at 576 visual tokens per question")
+    replay_options.add_argument("--fair-fusion-all", action="store_true", default=None,
+                                help="Compare fair fusion and full-image A2 on all val_inner questions")
     parser.add_argument("--split", choices=("val_inner", "official_val"))
     parser.add_argument("--images", type=int)
     parser.add_argument("--crop-fraction", type=float)
@@ -58,14 +60,16 @@ def main():
 
     sdrpn_options = ("sdrpn_env", "sdrpn_vendor", "sdrpn_checkpoint")
     settings = ("data_dir", "env", "paths", "selector", "selector_cache", "s1_run", "arm", "arms", "split",
-                "images", "crop_fraction", "zoom", "seed", "from_crop_run", "crop_ablation", "stack_s1b_a2", "fair_fusion",
-                "sdrpn_libexpat", *sdrpn_options)
+                "images", "crop_fraction", "zoom", "seed", "from_crop_run", "crop_ablation", "stack_s1b_a2",
+                "fair_fusion", "fair_fusion_all", "sdrpn_libexpat", *sdrpn_options)
     if args.crop_ablation and (args.from_crop_run is None or args.arms != ["A2"]):
         parser.error("--crop-ablation requires --from-crop-run and --arms A2")
     if args.stack_s1b_a2 and (args.from_crop_run is None or args.arms != ["S1b", "A2"]):
         parser.error("--stack-s1b-a2 requires --from-crop-run and --arms S1b A2")
     if args.fair_fusion and (args.from_crop_run is None or args.arms != ["S1b"]):
         parser.error("--fair-fusion requires --from-crop-run and --arms S1b")
+    if args.fair_fusion_all and (args.from_crop_run is None or args.arms != ["S1b", "A2"]):
+        parser.error("--fair-fusion-all requires --from-crop-run and --arms S1b A2")
     if args.resume is not None:
         if any(getattr(args, name) is not None for name in settings):
             parser.error("--resume reuses the original settings. Only --time and --dry-run may be overridden.")
@@ -78,8 +82,9 @@ def main():
             parser.error("--from-crop-run requires --s1-run and either --arm or --arms")
         if args.arms is not None and len(args.arms) != len(set(args.arms)):
             parser.error("--arms requires distinct checkpoints")
-        if any(getattr(args, name) is not None for name in settings
-               if name not in ("s1_run", "arm", "arms", "from_crop_run", "crop_ablation", "stack_s1b_a2", "fair_fusion")):
+        allowed = ("s1_run", "arm", "arms", "from_crop_run", "crop_ablation", "stack_s1b_a2", "fair_fusion",
+                   "fair_fusion_all")
+        if any(getattr(args, name) is not None for name in settings if name not in allowed):
             parser.error("--from-crop-run inherits the crop cohort, model environment and zoom")
         source = args.from_crop_run.resolve()
         if not all((source / name).is_file() for name in ("COMPLETE.json", "launch.json", "run.json", "predictions.jsonl")):
@@ -100,6 +105,8 @@ def main():
             launch["stack_s1b_a2"] = True
         if args.fair_fusion:
             launch["fair_fusion"] = True
+        if args.fair_fusion_all:
+            launch["fair_fusion_all"] = True
     else:
         if args.arms is not None:
             parser.error("--arms requires --from-crop-run")
@@ -180,7 +187,9 @@ def main():
             'print(f"SD-RPN import preflight passed: {pyexpat.EXPAT_VERSION}, Transformers {version}")',
         ], cwd=REPO, env=selector_environment(launch), check=True)
 
-    if launch.get("fair_fusion"):
+    if launch.get("fair_fusion_all"):
+        job, prefix = "qlrg-sdrpn-fusion-all", "sdrpn-fusion-all"
+    elif launch.get("fair_fusion"):
         job, prefix = "qlrg-sdrpn-fusion", "sdrpn-fusion"
     elif launch.get("stack_s1b_a2"):
         job, prefix = "qlrg-sdrpn-stack", "sdrpn-stack"

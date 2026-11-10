@@ -506,7 +506,8 @@ def run(output):
     replay = settings.get("from_crop_run")
     ablation = bool(settings.get("crop_ablation"))
     stack = bool(settings.get("stack_s1b_a2"))
-    fusion = bool(settings.get("fair_fusion"))
+    fusion_all = bool(settings.get("fair_fusion_all"))
+    fusion = fusion_all or bool(settings.get("fair_fusion"))
     donors = {} if replay else donor_questions(images, selected, settings["seed"])
     manifest = {**manifest, "images": selected}
     shared = runtime_shared(paths, config)
@@ -520,9 +521,10 @@ def run(output):
     if fusion:
         from scripts import crop_fusion
 
-        if not replay or ablation or stack or not multiple or set(checkpoints) != {"S1b"}:
-            raise ValueError("Fair fusion requires SD-RPN replay with S1b only")
-        labels = crop_fusion.FUSION_LABELS
+        required = {"S1b", "A2"} if fusion_all else {"S1b"}
+        if not replay or ablation or stack or not multiple or set(checkpoints) != required:
+            raise ValueError("Fair fusion requires SD-RPN replay with the declared checkpoints")
+        labels = crop_fusion.FUSION_ALL_LABELS if fusion_all else crop_fusion.FUSION_LABELS
     elif ablation:
         if not replay or set(checkpoints) != {"A2"}:
             raise ValueError("Crop ablation requires SD-RPN replay with A2 only")
@@ -550,7 +552,10 @@ def run(output):
         selector_binding = {"id": SELECTOR_ID, "revision": SELECTOR_REVISION}
     if fusion:
         original_question_count = sum(len(image["questions"]) for image in selected)
-        selected = crop_fusion.select_fusion_cohort(selected, crops)
+        roi_images = crop_fusion.select_fusion_cohort(selected, crops)
+        identity_image_id = roi_images[0]["image_id"]
+        if not fusion_all:
+            selected = roi_images
         omitted = original_question_count - sum(len(image["questions"]) for image in selected)
         manifest = {**manifest, "images": selected}
     binding = {
@@ -608,7 +613,9 @@ def run(output):
                 roi = crops[image["image_id"]] if replay else (read_json(proposals / shard.name) if proposals else None)
                 if fusion:
                     batch = crop_fusion.predict_fusion_image(model, adapters["S1b"], scorer, image, roi,
-                                                            paths["textvqa"], output, check_identity=index == 1)
+                                                            paths["textvqa"], output,
+                                                            check_identity=image["image_id"] == identity_image_id,
+                                                            lora=adapters.get("A2"))
                 else:
                     batch = predict_image(model, selector, adapters, scorer, image, donors, paths["textvqa"], output,
                                           settings, proposals=roi)
@@ -620,7 +627,8 @@ def run(output):
             if index % 50 == 0 or index == len(selected):
                 print(f"Query crop: {index}/{len(selected)} images", flush=True)
         if fusion:
-            summary = crop_fusion.summarize_fusion(rows, manifest, settings["seed"], identity, omitted)
+            summary = crop_fusion.summarize_fusion(rows, manifest, settings["seed"], identity, omitted,
+                                                   include_a2=fusion_all)
         else:
             summary = summarize(rows, labels, manifest, selector_seconds, settings["seed"], ablation=ablation)
         summary["checkpoint"] = binding["checkpoint"]
