@@ -50,6 +50,35 @@ def random_crop_box(box, size, seed, image_id, question_id):
     return left, top, left + w, top + h
 
 
+def read_a2_views(model, lora, scorer, question, refs, lr4, box, output, preview_key, check_identity):
+    start = time.perf_counter()
+    budget = TOTAL_TOKENS if box is None else VIEW_TOKENS
+    images = (lr4,) if box is None else (lr4, lr4.crop(box))
+    views = [fit_token_canvas(im, budget)[0] for im in images]
+    batch, grids = model.prepare_views(views, question["question"])
+    features = model.encode_views(batch)
+    identity, gate_seconds = None, 0.0
+    if check_identity and box is not None:
+        torch.cuda.synchronize()
+        gate_start = time.perf_counter()
+        with lora.attached():
+            native = model.prefill_logits(batch)
+            injected = model.prefill_logits(batch, features)
+        if not torch.equal(native, injected):
+            raise RuntimeError("Two-view A2 identity injection changed the logits")
+        identity = {"question_id": question["question_id"], "logits_exact": True, "visual_tokens": TOTAL_TOKENS}
+        gate_seconds = time.perf_counter() - gate_start
+    with lora.attached():
+        result = model.generate(batch, features)
+    reader_seconds = time.perf_counter() - start - gate_seconds
+    return {
+        **result, "crop_xyxy": box, "visual_tokens": sum(h * w for h, w in grids),
+        "prompt_tokens": batch["input_ids"].shape[1], "view_tokens": [h * w for h, w in grids],
+        "reader_seconds": reader_seconds, "preview": save_views(output, preview_key, views),
+        "score": refs.get(scorer.answer_processor(result["answer"]), 0.0),
+    }, identity
+
+
 @torch.inference_mode()
 def predict_confirmation_image(model, lora, scorer, image, proposals, root, output, seed, check_identity):
     _, lr4 = paired_images(root, image)
@@ -73,34 +102,11 @@ def predict_confirmation_image(model, lora, scorer, image, proposals, root, outp
                 source = reader_rows["full_A2" if box is None else "fusion_A2"]
                 result = {**source, "arm": arm}
             else:
-                start = time.perf_counter()
-                budget = TOTAL_TOKENS if box is None else VIEW_TOKENS
-                images = (lr4,) if box is None else (lr4, lr4.crop(box))
-                views = [fit_token_canvas(im, budget)[0] for im in images]
-                batch, grids = model.prepare_views(views, question["question"])
-                features = model.encode_views(batch)
-                # Logit parity runs once and is excluded from the reader latency.
-                gate_seconds = 0.0
-                if check_identity and box is not None and identity is None:
-                    torch.cuda.synchronize()
-                    gate_start = time.perf_counter()
-                    with lora.attached():
-                        native = model.prefill_logits(batch)
-                        injected = model.prefill_logits(batch, features)
-                    if not torch.equal(native, injected):
-                        raise RuntimeError("Two-view A2 identity injection changed the logits")
-                    identity = {"question_id": qid, "logits_exact": True, "visual_tokens": TOTAL_TOKENS}
-                    gate_seconds = time.perf_counter() - gate_start
-                with lora.attached():
-                    result = model.generate(batch, features)
-                reader_seconds = time.perf_counter() - start - gate_seconds
-                preview = save_views(output, [iid, "full_A2"] if box is None else [iid, qid, arm], views)
-                result = {
-                    **result, "arm": arm, "image_id": iid, "question_id": qid, "crop_xyxy": box,
-                    "visual_tokens": sum(h * w for h, w in grids), "prompt_tokens": batch["input_ids"].shape[1],
-                    "view_tokens": [h * w for h, w in grids], "reader_seconds": reader_seconds, "preview": preview,
-                    "score": refs.get(scorer.answer_processor(result["answer"]), 0.0),
-                }
+                key = [iid, "full_A2"] if box is None else [iid, qid, arm]
+                result, gate = read_a2_views(model, lora, scorer, question, refs, lr4, box, output, key,
+                                             check_identity and identity is None)
+                identity = identity or gate
+                result.update({"arm": arm, "image_id": iid, "question_id": qid})
             selector_seconds = region["selector_seconds"] if includes_selector else 0.0
             result.update({
                 "roi_selected": query_box is not None, "random_box_moved": random_box != query_box,

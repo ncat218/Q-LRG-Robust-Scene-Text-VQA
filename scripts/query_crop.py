@@ -509,6 +509,7 @@ def run(output):
     fusion_all = bool(settings.get("fair_fusion_all"))
     fusion = fusion_all or bool(settings.get("fair_fusion"))
     confirm = bool(settings.get("confirm_a2_fusion"))
+    benchmark = bool(settings.get("dbnet_benchmark"))
     donors = None if confirm else ({} if replay else donor_questions(images, selected, settings["seed"]))
     manifest = {**manifest, "images": selected}
     shared = runtime_shared(paths, config)
@@ -519,14 +520,18 @@ def run(output):
     labels = {arm: LABELS[arm] for arm in ("full", "query")}
     if not replay:
         labels["shuffled"] = LABELS["shuffled"]
-    if confirm:
+    if confirm or benchmark:
         from scripts import crop_fusion, fusion_confirm
 
         if (replay or ablation or stack or fusion or not multiple or set(checkpoints) != {"A2"}
-            or settings["split"] != "official_val" or settings["images"] is not None
+            or settings["split"] != ("val_inner" if benchmark else "official_val") or settings["images"] is not None
             or settings["selector"] != "sdrpn"):
-            raise ValueError("A2 confirmation requires fresh SD-RPN boxes for the full official validation split")
+            raise ValueError("The locked A2 study requires fresh SD-RPN boxes for its full declared split")
         labels = fusion_confirm.CONFIRM_LABELS
+        if benchmark:
+            from scripts import crop_benchmark, dbnet_crop
+
+            labels = crop_benchmark.LABELS
     elif fusion:
         from scripts import crop_fusion
 
@@ -581,11 +586,20 @@ def run(output):
         binding["replay"] = replay_binding
     if fusion:
         binding["fusion_code_sha256"] = sha256(Path(crop_fusion.__file__))
-    if confirm:
+    if confirm or benchmark:
         binding["selector_source"] = fusion_confirm.validate_selector_source(
             Path(settings["selector_source_run"]), selector_binding)
         binding["fusion_code_sha256"] = sha256(Path(crop_fusion.__file__))
         binding["confirmation_code_sha256"] = sha256(Path(fusion_confirm.__file__))
+    if benchmark:
+        binding["dbnet"] = {
+            "id": "OpenCV DBNet ResNet18 ICDAR2015", "model_sha256": sha256(settings["dbnet_model"]),
+            "opencv": "4.10.0.84", "input_size": list(dbnet_crop.INPUT_SIZE),
+            "match_minimum_text_overlap": dbnet_crop.MIN_TEXT_OVERLAP,
+            "detector_code_sha256": sha256(Path(dbnet_crop.__file__)),
+            "benchmark_code_sha256": sha256(Path(crop_benchmark.__file__)),
+            "textocr_sha256": sha256(paths["textocr"]),
+        }
     fingerprint = object_hash(binding)
     with FileLock(str(output / ".query-crop.lock"), timeout=0):
         state = output / "run.json"
@@ -596,6 +610,9 @@ def run(output):
             raise ValueError(f"Run is already complete: {output}")
         write_json(state, binding)
         print(f"Query crop on {manifest['split']}: {len(selected)} images, {len(labels)} arms", flush=True)
+        if benchmark:
+            detector = dbnet_crop.DBNet(settings["dbnet_model"], settings["dbnet_runtime"],
+                                        int(os.environ.get("SLURM_CPUS_PER_TASK", "4")))
         proposals = None
         if replay:
             print(f"Replaying locked SD-RPN crops from {replay}", flush=True)
@@ -605,7 +622,7 @@ def run(output):
         else:
             print(f"Loading selector {SELECTOR_ID} at {SELECTOR_REVISION} from {settings['selector_cache']}", flush=True)
             snapshot = selector_snapshot(settings["selector_cache"])
-        model_class = crop_fusion.FusionQwen if fusion or confirm else Qwen
+        model_class = crop_fusion.FusionQwen if fusion or confirm or benchmark else Qwen
         model = model_class(config, paths["hf_hub"])
         selector = None if use_sdrpn else ClipSelector(snapshot, model.device)
         adapters = {}
@@ -615,7 +632,7 @@ def run(output):
             adapter.eval()
             adapters[arm if multiple else "restore"] = adapter
         scorer = evaluator()
-        rows, selector_seconds, identity = [], 0.0, None
+        rows, selector_seconds, dbnet_seconds, identity = [], 0.0, 0.0, None
         for index, image in enumerate(selected, start=1):
             shard = output / "shards" / f"{object_hash(image['image_id'])[:24]}.json"
             if shard.is_file():
@@ -625,7 +642,11 @@ def run(output):
                     raise ValueError(f"Missing review preview for completed shard: {shard}")
             else:
                 roi = crops[image["image_id"]] if replay else (read_json(proposals / shard.name) if proposals else None)
-                if confirm:
+                if benchmark:
+                    batch = crop_benchmark.predict_image(
+                        model, adapters["A2"], detector, scorer, image, roi, donors, paths["textvqa"], output,
+                        settings["seed"], check_identity=identity is None)
+                elif confirm:
                     batch = fusion_confirm.predict_confirmation_image(
                         model, adapters["A2"], scorer, image, roi, paths["textvqa"], output,
                         settings["seed"], check_identity=identity is None)
@@ -642,9 +663,14 @@ def run(output):
                 identity = batch["identity"]
             rows.extend(batch["rows"])
             selector_seconds += batch["selector_seconds"]
+            dbnet_seconds += batch.get("dbnet_seconds", 0.0)
             if index % 50 == 0 or index == len(selected):
                 print(f"Query crop: {index}/{len(selected)} images", flush=True)
-        if confirm:
+        if benchmark:
+            summary = crop_benchmark.summarize(
+                rows, manifest, settings["seed"], identity, selector_seconds, dbnet_seconds, paths["textocr"])
+            summary["dbnet"] = binding["dbnet"]
+        elif confirm:
             summary = fusion_confirm.summarize_confirmation(rows, manifest, settings["seed"], identity, selector_seconds)
         elif fusion:
             summary = crop_fusion.summarize_fusion(rows, manifest, settings["seed"], identity, omitted,
@@ -678,6 +704,8 @@ def run(output):
             title = "Toàn ảnh + crop · Ngân sách 576 visual token · LR4"
         if confirm:
             title = "A2 · Validation chính thức · 576 visual token"
+        if benchmark:
+            title = "A2 · SD-RPN và DBNet · 576 visual token · LR4"
         write_case_review(output / "review.html", rows, labels, title=title,
                           manifest=manifest, seed=settings["seed"], crop_previews=previews)
         artifacts = ("summary.json", "predictions.jsonl", "review.html")

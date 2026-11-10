@@ -127,6 +127,46 @@ và toàn ảnh + crop ngẫu nhiên cùng kích thước. Nhánh fusion dùng 2
 khi thiếu ROI. Báo cáo có CI theo ảnh, nhóm phụ có crop, nhóm đổi được vị trí crop ngẫu nhiên và
 thời gian selector cộng reader khi model đã được nạp. Kết quả ở `runs/a2-fusion-official-…`.
 
+### Benchmark SD-RPN và DBNet trên toàn bộ val_inner
+
+```bash
+python3 run_query_crop.py \
+  --from-crop-run "$crop/runs/sdrpn-crop-20261107T173143Z-heum7_b7" \
+  --s1-run "$main/runs/s1-20261107T051836Z-wymhdtwk" \
+  --arms A2 --dbnet-benchmark \
+  --dbnet-model "$crop/local/dbnet/DB_IC15_resnet18.onnx" \
+  --dbnet-runtime "$crop/local/dbnet/python"
+```
+
+Đặt checkpoint DBNet ResNet-18 ICDAR2015 công khai vào đường dẫn `--dbnet-model`.
+Worker kiểm tra SHA-256 `62fce3a058ac519952062fbd2cf45bae661130ce753d2a0fc918f4776ba3a02a`.
+Dùng một Python có pip để cài `opencv-python-headless==4.10.0.84` với
+`--no-deps --target "$crop/local/dbnet/python"`. DBNet chạy bằng CPU trong môi trường Q-LRG và dùng
+chính các pixel LR4 của SD-RPN và A2. [Checkpoint và cấu hình mẫu của OpenCV](https://github.com/opencv/opencv/blob/4.12.0/doc/tutorials/dnn/dnn_text_spotting/dnn_text_spotting.markdown)
+
+| Nhánh | Đầu vào A2 |
+| --- | --- |
+| `full_A2` | Toàn ảnh |
+| `sdrpn` | Toàn ảnh + box SD-RPN theo câu hỏi |
+| `dbnet` | Toàn ảnh + box DBNet có confidence cao nhất |
+| `hybrid_union` | Toàn ảnh + hình chữ nhật bao cả box SD-RPN và box DBNet đã chọn |
+| `hybrid_text` | Toàn ảnh + nguyên box DBNet đã chọn |
+| `hybrid_intersection` | Toàn ảnh + phần hai box giao nhau |
+| `hybrid_random` | Toàn ảnh + box đặt ngẫu nhiên, cùng kích thước crop của `hybrid_union` sau padding |
+| `hybrid_shuffled` | Toàn ảnh + box bao từ SD-RPN nhận câu hỏi tráo, A2 trả lời câu hỏi gốc |
+
+Các nhánh hybrid dùng cùng ứng viên DBNet với cùng query. Xếp hạng theo tỷ lệ diện tích box chữ nằm
+trong box SD-RPN, rồi theo diện tích giao và confidence. Ngưỡng khớp cố định là 30%. Khi thiếu ứng viên
+đạt ngưỡng, hybrid dùng box SD-RPN. Khi thiếu box SD-RPN, hybrid quay về toàn ảnh. DBNet riêng quay
+về toàn ảnh khi thiếu box chữ. Các box được nới 20% mỗi cạnh và cắt theo biên ảnh.
+
+Chấm cùng 3.473 câu LR4 với A2. Hai ảnh dùng 288 + 288 visual token. Toàn ảnh và fallback dùng 576.
+Thời gian đầu-cuối cộng cả hai selector ở nhánh hybrid. Chi phí DBNet báo theo một lượt detect ảnh
+cho mỗi câu khi ước lượng độ trễ của từng nhánh. Job thực tế chia sẻ một lượt detect giữa các câu
+cùng ảnh. TextOCR chỉ dùng hậu nghiệm để đo vùng chữ đáp án được giữ lại trên tập con khớp duy nhất
+với ít nhất 8/10 đáp án. `summary.json` ghi cả kết quả trên tập con chung có crop. Kết quả nằm
+trong `runs/dbnet-benchmark-…`, kèm JSONL từng câu và HTML xem ảnh.
+
 Launcher submit ngay. SD-RPN ghi tọa độ và kết quả trong `runs/sdrpn-crop-…`, với một file đề xuất mỗi ảnh để hỗ trợ resume. Checkpoint và môi trường SD-RPN có sẵn được đọc tại chỗ. Lượt `--selector clip` ghi trong `runs/query-crop-…` và lấy checkpoint CLIP ghim revision khi cache trống (khoảng 605 MB). Có thể chuẩn bị cache CLIP tại node có mạng từ thư mục crop bằng lệnh:
 
 ```bash

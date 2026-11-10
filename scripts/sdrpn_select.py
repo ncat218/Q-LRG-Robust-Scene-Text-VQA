@@ -116,17 +116,14 @@ def main():
         results = {}
         for question in record["questions"]:
             qid = str(question["question_id"])
-            if "shuffled" not in question:
+            results[qid] = {}
+            routes = ("query", "shuffled") if "shuffled" in question else ("query",)
+            for route in routes:
                 torch.cuda.synchronize()
                 query_start = time.perf_counter()
-                region = selector.locate(lr4, request["prompt"].format(question=question["query"]))
+                region = selector.locate(lr4, request["prompt"].format(question=question[route]))
                 torch.cuda.synchronize()
-                results[qid] = {"query": {**region, "selector_seconds": time.perf_counter() - query_start}}
-                continue
-            results[qid] = {
-                route: selector.locate(lr4, request["prompt"].format(question=question[route]))
-                for route in ("query", "shuffled")
-            }
+                results[qid][route] = {**region, "selector_seconds": time.perf_counter() - query_start}
         write_json(shard, {"image_id": record["image_id"], "lr4_sha256": hashlib.sha256(lr4.tobytes()).hexdigest(),
                            "selector_seconds": time.perf_counter() - start, "questions": results})
         if index % 50 == 0 or index == len(request["images"]):
