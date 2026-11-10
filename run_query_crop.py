@@ -30,7 +30,8 @@ def main():
     checkpoint_options.add_argument("--arm", choices=("S1a", "S1b"))
     checkpoint_options.add_argument("--arms", nargs="+", choices=("S1a", "S1b", "A1", "A2"),
                                     help="Compare S1 and adaptation checkpoints in the same SD-RPN replay")
-    parser.add_argument("--from-crop-run", type=Path, help="Reuse crops from a completed SD-RPN val_inner run")
+    parser.add_argument("--from-crop-run", type=Path,
+                        help="Use a completed SD-RPN run as the crop or selector source")
     replay_options = parser.add_mutually_exclusive_group()
     replay_options.add_argument("--crop-ablation", action="store_true", default=None,
                                 help="With --arms A2, evaluate zoom, padding and fallback on fixed SD-RPN boxes")
@@ -40,6 +41,8 @@ def main():
                                 help="Compare full, crop and full plus crop at 576 visual tokens per question")
     replay_options.add_argument("--fair-fusion-all", action="store_true", default=None,
                                 help="Compare fair fusion and full-image A2 on all val_inner questions")
+    replay_options.add_argument("--confirm-a2-fusion", action="store_true", default=None,
+                                help="Lock A2, 576 tokens and the SD-RPN model for official validation")
     parser.add_argument("--split", choices=("val_inner", "official_val"))
     parser.add_argument("--images", type=int)
     parser.add_argument("--crop-fraction", type=float)
@@ -61,7 +64,7 @@ def main():
     sdrpn_options = ("sdrpn_env", "sdrpn_vendor", "sdrpn_checkpoint")
     settings = ("data_dir", "env", "paths", "selector", "selector_cache", "s1_run", "arm", "arms", "split",
                 "images", "crop_fraction", "zoom", "seed", "from_crop_run", "crop_ablation", "stack_s1b_a2",
-                "fair_fusion", "fair_fusion_all", "sdrpn_libexpat", *sdrpn_options)
+                "fair_fusion", "fair_fusion_all", "confirm_a2_fusion", "sdrpn_libexpat", *sdrpn_options)
     if args.crop_ablation and (args.from_crop_run is None or args.arms != ["A2"]):
         parser.error("--crop-ablation requires --from-crop-run and --arms A2")
     if args.stack_s1b_a2 and (args.from_crop_run is None or args.arms != ["S1b", "A2"]):
@@ -70,6 +73,8 @@ def main():
         parser.error("--fair-fusion requires --from-crop-run and --arms S1b")
     if args.fair_fusion_all and (args.from_crop_run is None or args.arms != ["S1b", "A2"]):
         parser.error("--fair-fusion-all requires --from-crop-run and --arms S1b A2")
+    if args.confirm_a2_fusion and (args.from_crop_run is None or args.arms != ["A2"]):
+        parser.error("--confirm-a2-fusion requires --from-crop-run and --arms A2")
     if args.resume is not None:
         if any(getattr(args, name) is not None for name in settings):
             parser.error("--resume reuses the original settings. Only --time and --dry-run may be overridden.")
@@ -83,7 +88,7 @@ def main():
         if args.arms is not None and len(args.arms) != len(set(args.arms)):
             parser.error("--arms requires distinct checkpoints")
         allowed = ("s1_run", "arm", "arms", "from_crop_run", "crop_ablation", "stack_s1b_a2", "fair_fusion",
-                   "fair_fusion_all")
+                   "fair_fusion_all", "confirm_a2_fusion")
         if any(getattr(args, name) is not None for name in settings if name not in allowed):
             parser.error("--from-crop-run inherits the crop cohort, model environment and zoom")
         source = args.from_crop_run.resolve()
@@ -93,10 +98,11 @@ def main():
         if (launch.get("selector") != "sdrpn" or launch["split"] != "val_inner"
             or launch["s1_run"] is not None or Path(launch["repo"]) != REPO):
             parser.error("Use a completed SD-RPN val_inner baseline in this checkout")
-        launch.update({
-            "from_crop_run": str(source), "s1_run": str(args.s1_run.resolve()), "arm": args.arm,
-            "time": args.time or "06:00:00",
-        })
+        launch.update({"s1_run": str(args.s1_run.resolve()), "arm": args.arm, "time": args.time or "06:00:00"})
+        if args.confirm_a2_fusion:
+            launch.update({"selector_source_run": str(source), "split": "official_val", "confirm_a2_fusion": True})
+        else:
+            launch["from_crop_run"] = str(source)
         if args.arms is not None:
             launch["arms"] = args.arms
         if args.crop_ablation:
@@ -187,7 +193,9 @@ def main():
             'print(f"SD-RPN import preflight passed: {pyexpat.EXPAT_VERSION}, Transformers {version}")',
         ], cwd=REPO, env=selector_environment(launch), check=True)
 
-    if launch.get("fair_fusion_all"):
+    if launch.get("confirm_a2_fusion"):
+        job, prefix = "qlrg-a2-fusion-val", "a2-fusion-official"
+    elif launch.get("fair_fusion_all"):
         job, prefix = "qlrg-sdrpn-fusion-all", "sdrpn-fusion-all"
     elif launch.get("fair_fusion"):
         job, prefix = "qlrg-sdrpn-fusion", "sdrpn-fusion"

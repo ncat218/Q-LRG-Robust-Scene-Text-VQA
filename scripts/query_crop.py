@@ -508,7 +508,8 @@ def run(output):
     stack = bool(settings.get("stack_s1b_a2"))
     fusion_all = bool(settings.get("fair_fusion_all"))
     fusion = fusion_all or bool(settings.get("fair_fusion"))
-    donors = {} if replay else donor_questions(images, selected, settings["seed"])
+    confirm = bool(settings.get("confirm_a2_fusion"))
+    donors = None if confirm else ({} if replay else donor_questions(images, selected, settings["seed"]))
     manifest = {**manifest, "images": selected}
     shared = runtime_shared(paths, config)
     checkpoints = checkpoints_for(settings, shared, hashes)
@@ -518,7 +519,15 @@ def run(output):
     labels = {arm: LABELS[arm] for arm in ("full", "query")}
     if not replay:
         labels["shuffled"] = LABELS["shuffled"]
-    if fusion:
+    if confirm:
+        from scripts import crop_fusion, fusion_confirm
+
+        if (replay or ablation or stack or fusion or not multiple or set(checkpoints) != {"A2"}
+            or settings["split"] != "official_val" or settings["images"] is not None
+            or settings["selector"] != "sdrpn"):
+            raise ValueError("A2 confirmation requires fresh SD-RPN boxes for the full official validation split")
+        labels = fusion_confirm.CONFIRM_LABELS
+    elif fusion:
         from scripts import crop_fusion
 
         required = {"S1b", "A2"} if fusion_all else {"S1b"}
@@ -572,6 +581,11 @@ def run(output):
         binding["replay"] = replay_binding
     if fusion:
         binding["fusion_code_sha256"] = sha256(Path(crop_fusion.__file__))
+    if confirm:
+        binding["selector_source"] = fusion_confirm.validate_selector_source(
+            Path(settings["selector_source_run"]), selector_binding)
+        binding["fusion_code_sha256"] = sha256(Path(crop_fusion.__file__))
+        binding["confirmation_code_sha256"] = sha256(Path(fusion_confirm.__file__))
     fingerprint = object_hash(binding)
     with FileLock(str(output / ".query-crop.lock"), timeout=0):
         state = output / "run.json"
@@ -591,7 +605,7 @@ def run(output):
         else:
             print(f"Loading selector {SELECTOR_ID} at {SELECTOR_REVISION} from {settings['selector_cache']}", flush=True)
             snapshot = selector_snapshot(settings["selector_cache"])
-        model_class = crop_fusion.FusionQwen if fusion else Qwen
+        model_class = crop_fusion.FusionQwen if fusion or confirm else Qwen
         model = model_class(config, paths["hf_hub"])
         selector = None if use_sdrpn else ClipSelector(snapshot, model.device)
         adapters = {}
@@ -611,7 +625,11 @@ def run(output):
                     raise ValueError(f"Missing review preview for completed shard: {shard}")
             else:
                 roi = crops[image["image_id"]] if replay else (read_json(proposals / shard.name) if proposals else None)
-                if fusion:
+                if confirm:
+                    batch = fusion_confirm.predict_confirmation_image(
+                        model, adapters["A2"], scorer, image, roi, paths["textvqa"], output,
+                        settings["seed"], check_identity=identity is None)
+                elif fusion:
                     batch = crop_fusion.predict_fusion_image(model, adapters["S1b"], scorer, image, roi,
                                                             paths["textvqa"], output,
                                                             check_identity=image["image_id"] == identity_image_id,
@@ -626,7 +644,9 @@ def run(output):
             selector_seconds += batch["selector_seconds"]
             if index % 50 == 0 or index == len(selected):
                 print(f"Query crop: {index}/{len(selected)} images", flush=True)
-        if fusion:
+        if confirm:
+            summary = fusion_confirm.summarize_confirmation(rows, manifest, settings["seed"], identity, selector_seconds)
+        elif fusion:
             summary = crop_fusion.summarize_fusion(rows, manifest, settings["seed"], identity, omitted,
                                                    include_a2=fusion_all)
         else:
@@ -656,6 +676,8 @@ def run(output):
             title = "S1b + A2 · Toàn ảnh và crop nới 20% · LR4"
         if fusion:
             title = "Toàn ảnh + crop · Ngân sách 576 visual token · LR4"
+        if confirm:
+            title = "A2 · Validation chính thức · 576 visual token"
         write_case_review(output / "review.html", rows, labels, title=title,
                           manifest=manifest, seed=settings["seed"], crop_previews=previews)
         artifacts = ("summary.json", "predictions.jsonl", "review.html")

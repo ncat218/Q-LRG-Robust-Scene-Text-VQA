@@ -116,6 +116,13 @@ def main():
         results = {}
         for question in record["questions"]:
             qid = str(question["question_id"])
+            if "shuffled" not in question:
+                torch.cuda.synchronize()
+                query_start = time.perf_counter()
+                region = selector.locate(lr4, request["prompt"].format(question=question["query"]))
+                torch.cuda.synchronize()
+                results[qid] = {"query": {**region, "selector_seconds": time.perf_counter() - query_start}}
+                continue
             results[qid] = {
                 route: selector.locate(lr4, request["prompt"].format(question=question[route]))
                 for route in ("query", "shuffled")

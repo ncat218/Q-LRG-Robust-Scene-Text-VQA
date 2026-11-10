@@ -112,6 +112,21 @@ toàn ảnh nếu cấu hình yêu cầu phục hồi toàn ảnh hoặc phục 
 giữ nguyên feature khi phải quay về toàn ảnh. A2 toàn ảnh được chấm cùng 576 token.
 Bảng chính gồm toàn bộ câu, còn `roi_only` giữ phép so phụ trên các câu có crop.
 
+### Kiểm chứng A2 trên validation chính thức
+
+```bash
+python3 run_query_crop.py \
+  --from-crop-run "$crop/runs/sdrpn-crop-20261107T173143Z-heum7_b7" \
+  --s1-run "$main/runs/s1-20261107T051836Z-wymhdtwk" \
+  --arms A2 --confirm-a2-fusion
+```
+
+Chế độ này lấy cấu hình selector đã khóa từ run nguồn và tạo box mới cho 5.000 câu validation chính thức.
+Ba nhánh giữ cùng A2 và 576 visual token. So toàn ảnh, toàn ảnh + crop SD-RPN nới 20%,
+và toàn ảnh + crop ngẫu nhiên cùng kích thước. Nhánh fusion dùng 288 + 288 token và quay về toàn ảnh
+khi thiếu ROI. Báo cáo có CI theo ảnh, nhóm phụ có crop, nhóm đổi được vị trí crop ngẫu nhiên và
+thời gian selector cộng reader khi model đã được nạp. Kết quả ở `runs/a2-fusion-official-…`.
+
 Launcher submit ngay. SD-RPN ghi tọa độ và kết quả trong `runs/sdrpn-crop-…`, với một file đề xuất mỗi ảnh để hỗ trợ resume. Checkpoint và môi trường SD-RPN có sẵn được đọc tại chỗ. Lượt `--selector clip` ghi trong `runs/query-crop-…` và lấy checkpoint CLIP ghim revision khi cache trống (khoảng 605 MB). Có thể chuẩn bị cache CLIP tại node có mạng từ thư mục crop bằng lệnh:
 
 ```bash

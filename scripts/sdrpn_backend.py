@@ -38,7 +38,8 @@ def run_selector(settings, repo, output, paths, config, selected, donors):
         "images": [{
             **{key: image[key] for key in ("image_id", "image_rel", "image_sha256", "size", "exif_orientation")},
             "questions": [{
-                "question_id": q["question_id"], "query": q["question"], "shuffled": donors[q["question_id"]][1],
+                "question_id": q["question_id"], "query": q["question"],
+                **({"shuffled": donors[q["question_id"]][1]} if donors is not None else {}),
             } for q in image["questions"]],
         } for image in selected],
     }
