@@ -45,8 +45,13 @@ def main():
                                 help="Lock A2, 576 tokens and the SD-RPN model for official validation")
     replay_options.add_argument("--dbnet-benchmark", action="store_true", default=None,
                                 help="Compare eight A2 crop and selector arms on all val_inner questions")
+    replay_options.add_argument("--restoration-cost", action="store_true", default=None,
+                                help="Measure FSRCNN and S1b with a shared 576-token budget")
     parser.add_argument("--dbnet-model", type=Path, help="Pinned ICDAR2015 DBNet ONNX weights")
     parser.add_argument("--dbnet-runtime", type=Path, help="Isolated opencv-python-headless 4.10.0.84 target directory")
+    parser.add_argument("--pixel-model", type=Path, help="Pinned FSRCNN ×4 TensorFlow weights")
+    parser.add_argument("--pixel-runtime", type=Path, help="Isolated opencv-contrib-python-headless 4.10.0.84 directory")
+    parser.add_argument("--profile-questions", type=int, help="Number of deterministically sampled questions for FLOPs")
     parser.add_argument("--split", choices=("val_inner", "official_val"))
     parser.add_argument("--images", type=int)
     parser.add_argument("--crop-fraction", type=float)
@@ -69,7 +74,8 @@ def main():
     settings = ("data_dir", "env", "paths", "selector", "selector_cache", "s1_run", "arm", "arms", "split",
                 "images", "crop_fraction", "zoom", "seed", "from_crop_run", "crop_ablation", "stack_s1b_a2",
                 "fair_fusion", "fair_fusion_all", "confirm_a2_fusion", "dbnet_benchmark", "dbnet_model",
-                "dbnet_runtime", "sdrpn_libexpat", *sdrpn_options)
+                "dbnet_runtime", "restoration_cost", "pixel_model", "pixel_runtime", "profile_questions",
+                "sdrpn_libexpat", *sdrpn_options)
     if args.crop_ablation and (args.from_crop_run is None or args.arms != ["A2"]):
         parser.error("--crop-ablation requires --from-crop-run and --arms A2")
     if args.stack_s1b_a2 and (args.from_crop_run is None or args.arms != ["S1b", "A2"]):
@@ -85,6 +91,16 @@ def main():
         parser.error("--dbnet-benchmark requires --from-crop-run, --arms A2, --dbnet-model and --dbnet-runtime")
     if not args.dbnet_benchmark and (args.dbnet_model is not None or args.dbnet_runtime is not None):
         parser.error("DBNet paths apply to --dbnet-benchmark")
+    if args.restoration_cost:
+        if (args.from_crop_run is None or args.arms != ["S1b"]
+            or args.pixel_model is None or args.pixel_runtime is None):
+            parser.error("--restoration-cost requires --from-crop-run, --arms S1b, --pixel-model and --pixel-runtime")
+        if args.profile_questions is not None and args.profile_questions < 1:
+            parser.error("--profile-questions must be positive")
+        if args.images is not None and args.images < 1:
+            parser.error("--images must be positive")
+    elif any(value is not None for value in (args.pixel_model, args.pixel_runtime, args.profile_questions)):
+        parser.error("Pixel model, runtime and profiling options apply to --restoration-cost")
     if args.resume is not None:
         if any(getattr(args, name) is not None for name in settings):
             parser.error("--resume reuses the original settings. Only --time and --dry-run may be overridden.")
@@ -98,7 +114,10 @@ def main():
         if args.arms is not None and len(args.arms) != len(set(args.arms)):
             parser.error("--arms requires distinct checkpoints")
         allowed = ("s1_run", "arm", "arms", "from_crop_run", "crop_ablation", "stack_s1b_a2", "fair_fusion",
-                   "fair_fusion_all", "confirm_a2_fusion", "dbnet_benchmark", "dbnet_model", "dbnet_runtime")
+                   "fair_fusion_all", "confirm_a2_fusion", "dbnet_benchmark", "dbnet_model", "dbnet_runtime",
+                   "restoration_cost", "pixel_model", "pixel_runtime", "profile_questions")
+        if args.restoration_cost:
+            allowed += ("images",)
         if any(getattr(args, name) is not None for name in settings if name not in allowed):
             parser.error("--from-crop-run inherits the crop cohort, model environment and zoom")
         source = args.from_crop_run.resolve()
@@ -117,6 +136,12 @@ def main():
             launch.update({
                 "selector_source_run": str(source), "dbnet_benchmark": True,
                 "dbnet_model": str(args.dbnet_model.resolve()), "dbnet_runtime": str(args.dbnet_runtime.resolve()),
+            })
+        elif args.restoration_cost:
+            launch.update({
+                "selector_source_run": str(source), "restoration_cost": True, "images": args.images,
+                "pixel_model": str(args.pixel_model.resolve()), "pixel_runtime": str(args.pixel_runtime.resolve()),
+                "profile_questions": args.profile_questions if args.profile_questions is not None else 32,
             })
         else:
             launch["from_crop_run"] = str(source)
@@ -180,6 +205,8 @@ def main():
                 Path(launch["data_dir"]) / f"{launch['split']}.json"]
     if launch.get("dbnet_benchmark"):
         required.extend((Path(launch["dbnet_model"]), Path(launch["dbnet_runtime"]) / "cv2" / "__init__.py"))
+    if launch.get("restoration_cost"):
+        required.extend((Path(launch["pixel_model"]), Path(launch["pixel_runtime"]) / "cv2" / "__init__.py"))
     replay = bool(launch.get("from_crop_run"))
     if launch["s1_run"] is not None:
         s1 = Path(launch["s1_run"]) / "s1"
@@ -212,7 +239,9 @@ def main():
             'print(f"SD-RPN import preflight passed: {pyexpat.EXPAT_VERSION}, Transformers {version}")',
         ], cwd=REPO, env=selector_environment(launch), check=True)
 
-    if launch.get("dbnet_benchmark"):
+    if launch.get("restoration_cost"):
+        job, prefix = "qlrg-restoration-cost", "restoration-cost"
+    elif launch.get("dbnet_benchmark"):
         job, prefix = "qlrg-dbnet-crop", "dbnet-benchmark"
     elif launch.get("confirm_a2_fusion"):
         job, prefix = "qlrg-a2-fusion-val", "a2-fusion-official"

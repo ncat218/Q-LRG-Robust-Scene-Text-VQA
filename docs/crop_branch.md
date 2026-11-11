@@ -167,6 +167,35 @@ cùng ảnh. TextOCR chỉ dùng hậu nghiệm để đo vùng chữ đáp án 
 với ít nhất 8/10 đáp án. `summary.json` ghi cả kết quả trên tập con chung có crop. Kết quả nằm
 trong `runs/dbnet-benchmark-…`, kèm JSONL từng câu và HTML xem ảnh.
 
+### Chi phí phục hồi pixel và latent
+
+```bash
+python3 run_query_crop.py \
+  --from-crop-run "$crop/runs/sdrpn-crop-20261107T173143Z-heum7_b7" \
+  --s1-run "$main/runs/s1-20261107T051836Z-wymhdtwk" --arms S1b \
+  --restoration-cost --profile-questions 32 \
+  --pixel-model "$crop/local/fsrcnn/FSRCNN_x4.pb" \
+  --pixel-runtime "$crop/local/fsrcnn/python"
+```
+
+Các nhánh dùng Qwen gốc với 576 visual token trên mỗi câu của `val_inner`. Có toàn ảnh gốc,
+toàn ảnh phục hồi pixel FSRCNN ×4, toàn ảnh bật S1b, crop với hai trạng thái tắt/bật S1b,
+và bốn trạng thái S1b khi ghép toàn ảnh + crop (288 + 288). SD-RPN chọn box theo query,
+nới 20% và giữ quy tắc fallback của fair fusion. Nhánh crop tính cả chi phí SD-RPN ở câu fallback.
+FSRCNN chạy CPU, nhận đúng ảnh giảm độ phân giải 4 lần trước bước bicubic upsample của LR4.
+Checkpoint ghim SHA-256 trong code, chạy với `opencv-contrib-python-headless==4.10.0.84`
+cài bằng `pip --no-deps --target` vào thư mục `--pixel-runtime` khi dùng lệnh `pip install`.
+[Trọng số FSRCNN ×4](https://github.com/Saafke/FSRCNN_Tensorflow/tree/6a4812c4ef1c4f5947d79beafa32a05a6eb4a94d/models)
+
+`cost.csv` báo accuracy, visual token, prompt token, token sinh, latency trung bình, p50 và p95.
+Thời gian tính theo từng bước chọn vùng, phục hồi pixel, chuẩn bị input, vision encoder, phục hồi
+latent và sinh đáp án. Các bước CUDA đo có đồng bộ, sau khi nạp model, ở lượt chạy thường.
+FLOPs ước tính trên cùng 32 câu chọn theo seed cố định ở lượt chạy riêng, dùng bộ đếm phép toán
+đã đăng ký của PyTorch và `Net.getFLOPS` của OpenCV cho FSRCNN. Ước tính có giới hạn theo các
+phép toán được từng bộ đếm hỗ trợ. Mỗi nhánh nhận chi phí cho các bước cần để trả lời riêng một
+câu, dù job dùng lại kết quả giữa các nhánh hoặc các câu cùng ảnh. Dùng `--images 6` để chạy smoke.
+Kết quả nằm trong `runs/restoration-cost-…`.
+
 Launcher submit ngay. SD-RPN ghi tọa độ và kết quả trong `runs/sdrpn-crop-…`, với một file đề xuất mỗi ảnh để hỗ trợ resume. Checkpoint và môi trường SD-RPN có sẵn được đọc tại chỗ. Lượt `--selector clip` ghi trong `runs/query-crop-…` và lấy checkpoint CLIP ghim revision khi cache trống (khoảng 605 MB). Có thể chuẩn bị cache CLIP tại node có mạng từ thư mục crop bằng lệnh:
 
 ```bash

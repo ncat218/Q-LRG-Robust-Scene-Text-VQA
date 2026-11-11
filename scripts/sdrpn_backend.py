@@ -32,7 +32,7 @@ def selector_provenance(settings, repo):
     }
 
 
-def run_selector(settings, repo, output, paths, config, selected, donors):
+def run_selector(settings, repo, output, paths, config, selected, donors, profile_ids=()):
     request = {
         "textvqa": str(paths["textvqa"]), "prompt": config["prompt"], "seed": settings["seed"],
         "images": [{
@@ -43,6 +43,8 @@ def run_selector(settings, repo, output, paths, config, selected, donors):
             } for q in image["questions"]],
         } for image in selected],
     }
+    if profile_ids:
+        request["profile_question_ids"] = sorted(profile_ids)
     request_path = output / "sdrpn-request.json"
     write_json(request_path, request)
     snapshot = paths["hf_hub"] / ("models--" + config["id"].replace("/", "--")) / "snapshots" / config["revision"]

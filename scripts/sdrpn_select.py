@@ -99,6 +99,7 @@ def main():
         parser.add_argument(f"--{name}", type=Path, required=True)
     args = parser.parse_args()
     request = read_json(args.request)
+    profile_ids = set(request.get("profile_question_ids", []))
     selector = None
     for index, record in enumerate(request["images"], start=1):
         shard = args.output / f"{object_hash(record['image_id'])[:24]}.json"
@@ -119,11 +120,17 @@ def main():
             results[qid] = {}
             routes = ("query", "shuffled") if "shuffled" in question else ("query",)
             for route in routes:
+                prompt = request["prompt"].format(question=question[route])
                 torch.cuda.synchronize()
                 query_start = time.perf_counter()
-                region = selector.locate(lr4, request["prompt"].format(question=question[route]))
+                region = selector.locate(lr4, prompt)
                 torch.cuda.synchronize()
                 results[qid][route] = {**region, "selector_seconds": time.perf_counter() - query_start}
+                if qid in profile_ids:
+                    from scripts.compute_cost import count_flops
+
+                    _, flops = count_flops(lambda: selector.locate(lr4, prompt))
+                    results[qid][route]["selector_flops"] = flops
         write_json(shard, {"image_id": record["image_id"], "lr4_sha256": hashlib.sha256(lr4.tobytes()).hexdigest(),
                            "selector_seconds": time.perf_counter() - start, "questions": results})
         if index % 50 == 0 or index == len(request["images"]):

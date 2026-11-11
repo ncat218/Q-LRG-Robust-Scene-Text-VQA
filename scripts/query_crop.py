@@ -510,7 +510,8 @@ def run(output):
     fusion = fusion_all or bool(settings.get("fair_fusion"))
     confirm = bool(settings.get("confirm_a2_fusion"))
     benchmark = bool(settings.get("dbnet_benchmark"))
-    donors = None if confirm else ({} if replay else donor_questions(images, selected, settings["seed"]))
+    cost = bool(settings.get("restoration_cost"))
+    donors = None if confirm or cost else ({} if replay else donor_questions(images, selected, settings["seed"]))
     manifest = {**manifest, "images": selected}
     shared = runtime_shared(paths, config)
     checkpoints = checkpoints_for(settings, shared, hashes)
@@ -520,7 +521,16 @@ def run(output):
     labels = {arm: LABELS[arm] for arm in ("full", "query")}
     if not replay:
         labels["shuffled"] = LABELS["shuffled"]
-    if confirm or benchmark:
+    if cost:
+        from scripts import crop_fusion, fusion_confirm, restoration_cost
+
+        if (replay or not multiple or set(checkpoints) != {"S1b"} or settings["split"] != "val_inner"
+            or settings["selector"] != "sdrpn"):
+            raise ValueError("Restoration cost requires S1b and fresh SD-RPN boxes on val_inner")
+        labels = restoration_cost.LABELS
+        qids = [str(q["question_id"]) for image in selected for q in image["questions"]]
+        profile_ids = set(sorted(qids, key=lambda qid: rank(settings["seed"], qid))[:settings["profile_questions"]])
+    elif confirm or benchmark:
         from scripts import crop_fusion, fusion_confirm
 
         if (replay or ablation or stack or fusion or not multiple or set(checkpoints) != {"A2"}
@@ -586,7 +596,7 @@ def run(output):
         binding["replay"] = replay_binding
     if fusion:
         binding["fusion_code_sha256"] = sha256(Path(crop_fusion.__file__))
-    if confirm or benchmark:
+    if confirm or benchmark or cost:
         binding["selector_source"] = fusion_confirm.validate_selector_source(
             Path(settings["selector_source_run"]), selector_binding)
         binding["fusion_code_sha256"] = sha256(Path(crop_fusion.__file__))
@@ -599,6 +609,13 @@ def run(output):
             "detector_code_sha256": sha256(Path(dbnet_crop.__file__)),
             "benchmark_code_sha256": sha256(Path(crop_benchmark.__file__)),
             "textocr_sha256": sha256(paths["textocr"]),
+        }
+    if cost:
+        binding["restoration_cost"] = {
+            "pixel_model": "FSRCNN ×4", "pixel_sha256": sha256(settings["pixel_model"]),
+            "opencv": "4.10.0.84", "profile_question_ids": sorted(profile_ids),
+            "cost_code_sha256": sha256(Path(restoration_cost.__file__)),
+            "counter_code_sha256": sha256(repo / "scripts" / "compute_cost.py"),
         }
     fingerprint = object_hash(binding)
     with FileLock(str(output / ".query-crop.lock"), timeout=0):
@@ -613,16 +630,19 @@ def run(output):
         if benchmark:
             detector = dbnet_crop.DBNet(settings["dbnet_model"], settings["dbnet_runtime"],
                                         int(os.environ.get("SLURM_CPUS_PER_TASK", "4")))
+        if cost:
+            pixel = restoration_cost.PixelRestorer(settings["pixel_model"], settings["pixel_runtime"],
+                                                   int(os.environ.get("SLURM_CPUS_PER_TASK", "4")))
         proposals = None
         if replay:
             print(f"Replaying locked SD-RPN crops from {replay}", flush=True)
         elif use_sdrpn:
             print(f"Generating boxes with {selector_binding['id']}", flush=True)
-            proposals = run_selector(settings, repo, output, paths, config, selected, donors)
+            proposals = run_selector(settings, repo, output, paths, config, selected, donors, profile_ids if cost else ())
         else:
             print(f"Loading selector {SELECTOR_ID} at {SELECTOR_REVISION} from {settings['selector_cache']}", flush=True)
             snapshot = selector_snapshot(settings["selector_cache"])
-        model_class = crop_fusion.FusionQwen if fusion or confirm or benchmark else Qwen
+        model_class = crop_fusion.FusionQwen if fusion or confirm or benchmark or cost else Qwen
         model = model_class(config, paths["hf_hub"])
         selector = None if use_sdrpn else ClipSelector(snapshot, model.device)
         adapters = {}
@@ -642,7 +662,11 @@ def run(output):
                     raise ValueError(f"Missing review preview for completed shard: {shard}")
             else:
                 roi = crops[image["image_id"]] if replay else (read_json(proposals / shard.name) if proposals else None)
-                if benchmark:
+                if cost:
+                    batch = restoration_cost.predict_image(
+                        model, adapters["S1b"], pixel, scorer, image, roi, paths["textvqa"], output,
+                        profile_ids, check_identity=identity is None)
+                elif benchmark:
                     batch = crop_benchmark.predict_image(
                         model, adapters["A2"], detector, scorer, image, roi, donors, paths["textvqa"], output,
                         settings["seed"], check_identity=identity is None)
@@ -666,7 +690,11 @@ def run(output):
             dbnet_seconds += batch.get("dbnet_seconds", 0.0)
             if index % 50 == 0 or index == len(selected):
                 print(f"Query crop: {index}/{len(selected)} images", flush=True)
-        if benchmark:
+        if cost:
+            summary = restoration_cost.summarize(rows, manifest, settings["seed"], identity, profile_ids)
+            summary["restoration_cost"] = binding["restoration_cost"]
+            restoration_cost.write_cost_csv(output / "cost.csv", summary["arms"])
+        elif benchmark:
             summary = crop_benchmark.summarize(
                 rows, manifest, settings["seed"], identity, selector_seconds, dbnet_seconds, paths["textocr"])
             summary["dbnet"] = binding["dbnet"]
@@ -706,9 +734,13 @@ def run(output):
             title = "A2 · Validation chính thức · 576 visual token"
         if benchmark:
             title = "A2 · SD-RPN và DBNet · 576 visual token · LR4"
+        if cost:
+            title = "Qwen · Phục hồi pixel và latent · 576 visual token · LR4"
         write_case_review(output / "review.html", rows, labels, title=title,
                           manifest=manifest, seed=settings["seed"], crop_previews=previews)
         artifacts = ("summary.json", "predictions.jsonl", "review.html")
+        if cost:
+            artifacts += ("cost.csv",)
         write_json(complete, {"stage": "query_crop", "binding": fingerprint,
                               "artifacts": {name: sha256(output / name) for name in artifacts}})
     print(f"Query crop complete: {output / 'summary.json'}", flush=True)
