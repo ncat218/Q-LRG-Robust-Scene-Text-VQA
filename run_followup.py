@@ -36,7 +36,7 @@ def submit(mode, settings, source, dry_run=False):
     (run / "launch.json").write_text(json.dumps(launch, indent=2) + "\n", encoding="utf-8")
     script = write_script(run, mode, [
         'export OMP_NUM_THREADS="${SLURM_CPUS_PER_TASK:-4}"',
-        "export TOKENIZERS_PARALLELISM=false PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1",
+        "export TOKENIZERS_PARALLELISM=false PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 HF_HUB_DISABLE_XET=1",
         "export QLRG_ENV=" + shlex.quote(settings["env"]),
         "export QLRG_PATHS_CONFIG=" + shlex.quote(settings["paths"]),
         "bash scripts/check_environment.sh",

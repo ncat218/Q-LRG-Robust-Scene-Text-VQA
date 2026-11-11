@@ -230,3 +230,34 @@ Lượt đầu tái sử dụng cohort grounding tạm của S0 job 10756. Có t
 Launcher tạo một job MIG 35 GB với mặc định 30 phút. Thêm `--dry-run` để xem lệnh Slurm hoặc `--limit 12` để thử trên 12 câu. Job kiểm tra môi trường có sẵn trước khi load model. Kết quả ở thư mục `runs/crop-oracle-…` trong worktree crop, gồm `summary.json`, `predictions.jsonl` và `review.html` để lọc câu tăng, giảm hoặc giữ điểm. Mỗi dự đoán có tọa độ crop, kích thước trước processor, grid, số visual token và thời gian sinh.
 
 Để đo recall detector trên LR4, thêm `--detections /absolute/path/lr4_detections.jsonl`. Mỗi ảnh trong cohort cần một dòng có `image_id`, `image_sha256` từ manifest, `condition: "LR4"` và `boxes` theo tọa độ `[x0,y0,x1,y1]` trên canvas LR4. Ghi danh sách rỗng khi detector bỏ sót. Báo cáo đếm mỗi từ vùng đáp án có ít nhất 50% diện tích bbox nằm trong một bbox dự đoán và đếm số câu giữ được mọi từ vùng đáp án. Kết quả detector dùng để tính recall trong lượt này.
+
+## Official validation follow-up
+
+From the crop checkout on the login node, submit the two independent jobs with:
+
+```bash
+python3 run_followup.py --from-confirm runs/a2-fusion-official-20261110T115853Z-k5mhzwkw
+```
+
+Use `--mode restoration` or `--mode crop` to submit just one study.
+Both workers use all 5,000 official TextVQA validation questions and the frozen
+S1 checkpoints referenced by the completed confirmation run.
+
+- Restoration evaluates the original audited LR4, Gaussian blur of CLEAN at
+  Pillow radius 4 px, and Gaussian blur of the existing bicubic LR4 at the same
+  radius. It writes separate accuracy and paired CSVs for each condition. Blur
+  is generated in memory. Each condition contains A0, S1a, S1b, A1, A2, the
+  two CLEAN-only controls, and S1b combined with A2.
+- The selector benchmark compares full-image A2 to crop-only and full-plus-crop
+  A2 for SD-RPN 3B, ViCrop rel-att on Qwen2.5-VL-3B, SD-RPN 7B, and Vision-RL²
+  7B. It uses the existing 576-token reader preset and 20% padding per side.
+  The 7B comparison uses the same single-box decoder for both checkpoints.
+  ViCrop selects its attention layer on grounded val_inner cases before
+  inference on official validation. TextOCR coverage is a diagnostic and
+  fallback to full-image A2 remains in the 5,000-question denominator.
+- The crop worker stages pinned public 7B assets in `local/visionrl2` (around
+  21 GB of weights after deduplicating three identical shards). Optional
+  pre-staging uses the existing Q-LRG environment:
+  `python -m scripts.selector_assets local/visionrl2`. A file lock protects
+  the cache. The audit covers released VisualCoT candidate and 7B RL pools,
+  with incomplete coverage of upstream SD-RPN training data.

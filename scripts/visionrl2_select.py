@@ -45,9 +45,9 @@ class Selector:
             raise RuntimeError(f"7B selector checkpoint failed to load: {loading}")
         self.model = model.to("cuda").eval().requires_grad_(False)
         backbone = self.model.model
-        if not backbone.enable_twig or not backbone.roi_multi_head:
+        if not backbone.enable_twig or not config.get("roi_multi_head"):
             raise RuntimeError("Checkpoint did not enable the multi-head RoI predictor")
-        backbone.roi_enable2stage = True
+        self.model.roi_enable2stage = backbone.roi_enable2stage = True
         backbone.roi_conf_thresh = 0.15
 
     @torch.inference_mode()

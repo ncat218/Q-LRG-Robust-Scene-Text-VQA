@@ -50,10 +50,15 @@ def random_crop_box(box, size, seed, image_id, question_id):
     return left, top, left + w, top + h
 
 
-def read_a2_views(model, lora, scorer, question, refs, lr4, box, output, preview_key, check_identity):
+def read_a2_views(model, lora, scorer, question, refs, lr4, box, output, preview_key, check_identity, crop_only=False):
     start = time.perf_counter()
-    budget = TOTAL_TOKENS if box is None else VIEW_TOKENS
-    images = (lr4,) if box is None else (lr4, lr4.crop(box))
+    budget = TOTAL_TOKENS if box is None or crop_only else VIEW_TOKENS
+    if box is None:
+        images = (lr4,)
+    elif crop_only:
+        images = (lr4.crop(box),)
+    else:
+        images = (lr4, lr4.crop(box))
     views = [fit_token_canvas(im, budget)[0] for im in images]
     batch, grids = model.prepare_views(views, question["question"])
     features = model.encode_views(batch)
@@ -74,7 +79,7 @@ def read_a2_views(model, lora, scorer, question, refs, lr4, box, output, preview
     return {
         **result, "crop_xyxy": box, "visual_tokens": sum(h * w for h, w in grids),
         "prompt_tokens": batch["input_ids"].shape[1], "view_tokens": [h * w for h, w in grids],
-        "reader_seconds": reader_seconds, "preview": save_views(output, preview_key, views),
+        "reader_seconds": reader_seconds, "preview": save_views(output, preview_key, views) if output is not None else None,
         "score": refs.get(scorer.answer_processor(result["answer"]), 0.0),
     }, identity
 
