@@ -6,12 +6,13 @@ import json
 import subprocess
 from pathlib import Path
 from statistics import mean
+from urllib.request import urlopen
 
 import numpy as np
 import torch
 from filelock import FileLock
 
-from qlrg.common import object_hash, read_json, sha256, write_json
+from qlrg.common import atomic_write, object_hash, read_json, sha256, write_json
 from qlrg.evaluation import SCORER_REVISION, evaluator, paired_bootstrap
 from qlrg.experiment import paired_images
 from qlrg.s1_manifests import read_s1_manifests
@@ -30,6 +31,23 @@ SELECTORS = ("sdrpn_3b", "vicrop_3b", *MODELS)
 ARMS = ("full_A2", *(f"{arm}_{view}" for arm in SELECTORS for view in ("fusion", "crop")))
 LABELS = {"full_A2": "A2 · toàn ảnh", "sdrpn_3b": "SD-RPN 3B", "vicrop_3b": "ViCrop relative attention 3B",
           "sdrpn_7b": "SD-RPN 7B", "visionrl2_7b": "Vision-RL² 7B"}
+
+
+TEXTOCR_VAL_URL = "https://dl.fbaipublicfiles.com/textvqa/data/textocr/TextOCR_0.1_val.json"
+TEXTOCR_VAL_SHA256 = "0d04c1c9f5ba99e90be5b0df9ab34f6237b3fbc55443f263133d5c49b6435918"
+
+
+def validation_ocr(repo):
+    path = repo / "local/TextOCR_0.1_val.json"
+    if not path.is_file():
+        with urlopen(TEXTOCR_VAL_URL, timeout=60) as response:
+            data = response.read()
+        if hashlib.sha256(data).hexdigest() != TEXTOCR_VAL_SHA256:
+            raise ValueError("Unexpected TextOCR validation download")
+        atomic_write(path, data)
+    if sha256(path) != TEXTOCR_VAL_SHA256:
+        raise ValueError(f"Unexpected TextOCR validation annotation: {path}")
+    return path
 
 
 def pad(box, size):
@@ -185,13 +203,19 @@ def run(output):
         done, original = (read_json(source / name) for name in ("COMPLETE.json", "run.json"))
         if done["stage"] != "query_crop" or done["binding"] != object_hash(original):
             raise ValueError("SD-RPN 3B proposal source is not a verified run")
-        vendor, weights, training = prepare(Path(launch["repo"]) / "local/visionrl2")
+        repo = Path(launch["repo"])
+        textocr_val = validation_ocr(repo)
+        polygons = answer_polygons(manifest, textocr_val)
+        if not polygons:
+            raise ValueError("TextOCR validation has no grounded questions matching the manifest")
+        print(f"TextOCR validation grounding: {len(polygons)}/5000 questions", flush=True)
+        vendor, weights, training = prepare(repo / "local/visionrl2")
         audit = overlap_audit(manifest, training)
         write_json(output / "training_overlap.json", audit)
         binding.update({"sdrpn_3b_source_binding": done["binding"], "models": {arm: list(x) for arm, x in MODELS.items()},
                         "visionrl2_commit": UPSTREAM_REVISION, "vicrop_reference_commit": VICROP_REVISION,
                         "worker_sha256": sha256(Path(__file__)), "selector_visual_token_cap": 288,
-                        "roi_threshold": 0.15, "padding_per_side": PADDING["pad20"], "reader_tokens": TOTAL_TOKENS})
+                        "textocr_val_sha256": TEXTOCR_VAL_SHA256, "roi_threshold": 0.15, "padding_per_side": PADDING["pad20"], "reader_tokens": TOTAL_TOKENS})
         bind(output, binding)
         run_7b(launch, paths, config, manifest, output, vendor, weights)
         model = FusionQwen(config, paths["hf_hub"])
@@ -218,7 +242,6 @@ def run(output):
             identity = identity or batch["identity"]
             if index % 50 == 0 or index == len(manifest["images"]):
                 print(f"Crop benchmark: {index}/{len(manifest['images'])} images", flush=True)
-        polygons = answer_polygons(manifest, paths["textocr"])
         finish(output, binding, report(output, rows, manifest, polygons, launch["seed"], identity, audit, calibration),
                rows)
 
