@@ -63,13 +63,12 @@ def load_clean(path, expected_hash=None):
         return image.convert("RGB"), orientation, digest
 
 
-def bicubic_downsample(clean):
-    width, height = clean.size
-    return clean.resize((max(1, width // 4), max(1, height // 4)), Image.Resampling.BICUBIC)
-
-
 def bicubic_control(clean):
-    return bicubic_downsample(clean).resize(clean.size, Image.Resampling.BICUBIC)
+    width, height = clean.size
+    bicubic = Image.Resampling.BICUBIC
+    return clean.resize((max(1, width // 4), max(1, height // 4)), bicubic).resize(
+        clean.size, bicubic
+    )
 
 
 def normalized_literal(value):

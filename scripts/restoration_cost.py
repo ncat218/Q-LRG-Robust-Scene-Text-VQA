@@ -13,7 +13,6 @@ import torch
 from PIL import Image
 
 from qlrg.common import atomic_write, sha256
-from qlrg.data import bicubic_downsample
 from qlrg.evaluation import SCORER_REVISION, paired_bootstrap
 from qlrg.experiment import paired_images
 from scripts.compute_cost import measure
@@ -75,7 +74,10 @@ def predict_image(model, adapter, pixel, scorer, image, proposals, root, output,
     if (proposals["image_id"] != iid or hashlib.sha256(lr4.tobytes()).hexdigest() != proposals["lr4_sha256"]
         or set(proposals["questions"]) != {str(q["question_id"]) for q in image["questions"]}):
         raise ValueError(f"SD-RPN used different LR4 pixels or questions for {iid}")
-    restored_pixels, pixel_seconds, pixel_flops = pixel.restore(bicubic_downsample(clean), lr4.size)
+    low = clean.resize((max(1, clean.width // 4), max(1, clean.height // 4)), Image.Resampling.BICUBIC)
+    if low.resize(lr4.size, Image.Resampling.BICUBIC).tobytes() != lr4.tobytes():
+        raise ValueError("Pixel restoration input does not reproduce the audited LR4 control")
+    restored_pixels, pixel_seconds, pixel_flops = pixel.restore(low, lr4.size)
     rows, identity = [], None
     for question in image["questions"]:
         qid = question["question_id"]
