@@ -36,6 +36,8 @@ class Selector:
         upstream.get_batched_sub_images_v2 = intercept
         self.processor = AutoProcessor.from_pretrained(
             processor, local_files_only=True, use_fast=True, min_pixels=3136, max_pixels=288 * 28 * 28)
+        if not self.processor.chat_template:
+            raise ValueError(f"Qwen2.5-VL-7B processor is missing its chat template: {processor}")
         self.processor.tokenizer.padding_side = "left"
         model, loading = upstream.Qwen2_5_VLForConditionalGeneration.from_pretrained(
             checkpoint, local_files_only=True, torch_dtype=torch.bfloat16, attn_implementation="sdpa",

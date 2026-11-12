@@ -23,7 +23,7 @@ from scripts.followup_common import bind, finish, load_study, write_table
 from scripts.fusion_confirm import read_a2_views
 from scripts.query_crop import PADDING, padded_box
 from scripts.sdrpn_runtime import selector_environment
-from scripts.selector_assets import DATA_REVISION, MODELS, UPSTREAM_REVISION, prepare
+from scripts.selector_assets import DATA_REVISION, MODELS, PROCESSOR, UPSTREAM_REVISION, prepare
 from scripts.vicrop_select import UPSTREAM_REVISION as VICROP_REVISION, ViCrop, calibrate
 
 
@@ -72,13 +72,14 @@ def overlap_audit(manifest, files):
             "scope": "Released VisualCoT candidate pool and Vision-RL² 7B RL pool; full original SD-RPN corpora unverified."}
 
 
-def run_7b(launch, paths, config, manifest, output, vendor, checkpoints):
+def run_7b(launch, paths, config, manifest, output, vendor, checkpoints, processor, smoke=False):
+    images = manifest["images"][:3] if smoke else manifest["images"]
     request = {"textvqa": str(paths["textvqa"]), "prompt": config["prompt"], "seed": launch["seed"],
                "images": [{**{key: record[key] for key in ("image_id", "image_rel", "image_sha256", "size",
                                                          "exif_orientation")},
                            "questions": [{"question_id": q["question_id"], "query": q["question"]}
-                                         for q in record["questions"]]} for record in manifest["images"]]}
-    request_path = output / "selector-request.json"
+                                         for q in record["questions"]]} for record in images]}
+    request_path = output / ("selector-smoke-request.json" if smoke else "selector-request.json")
     write_json(request_path, request)
     env = selector_environment(launch)
     env.update({"HF_HUB_OFFLINE": "1", "TRANSFORMERS_OFFLINE": "1",
@@ -88,7 +89,7 @@ def run_7b(launch, paths, config, manifest, output, vendor, checkpoints):
             str(Path(launch["sdrpn_env"]) / "bin/python"), "-B", str(
                 Path(launch["repo"]) / "scripts/visionrl2_select.py"),
             "--request", str(request_path), "--output", str(output / arm), "--vendor", str(vendor),
-            "--checkpoint", str(checkpoint), "--processor", str(checkpoints["sdrpn_7b"]),
+            "--checkpoint", str(checkpoint), "--processor", str(processor),
         ], cwd=launch["repo"], env=env, check=True)
 
 
@@ -209,15 +210,19 @@ def run(output):
         if not polygons:
             raise ValueError("TextOCR validation has no grounded questions matching the manifest")
         print(f"TextOCR validation grounding: {len(polygons)}/5000 questions", flush=True)
-        vendor, weights, training = prepare(repo / "local/visionrl2")
+        vendor, weights, processor, training = prepare(repo / "local/visionrl2")
         audit = overlap_audit(manifest, training)
         write_json(output / "training_overlap.json", audit)
         binding.update({"sdrpn_3b_source_binding": done["binding"], "models": {arm: list(x) for arm, x in MODELS.items()},
                         "visionrl2_commit": UPSTREAM_REVISION, "vicrop_reference_commit": VICROP_REVISION,
+                        "selector_processor": {"id": PROCESSOR[0], "revision": PROCESSOR[1],
+                                               "chat_template_sha256": sha256(processor / "chat_template.json")},
                         "worker_sha256": sha256(Path(__file__)), "selector_visual_token_cap": 288,
                         "textocr_val_sha256": TEXTOCR_VAL_SHA256, "roi_threshold": 0.15, "padding_per_side": PADDING["pad20"], "reader_tokens": TOTAL_TOKENS})
         bind(output, binding)
-        run_7b(launch, paths, config, manifest, output, vendor, weights)
+        run_7b(launch, paths, config, manifest, output, vendor, weights, processor, smoke=True)
+        print("Both 7B selectors produced proposal shards on the first three validation images.", flush=True)
+        run_7b(launch, paths, config, manifest, output, vendor, weights, processor)
         model = FusionQwen(config, paths["hf_hub"])
         torch.backends.cuda.matmul.allow_tf32 = False
         trained = checkpoints["A2"]

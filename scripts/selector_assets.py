@@ -16,6 +16,9 @@ MODELS = {
     "sdrpn_7b": ("YuhengSSS/SDRPN-Qwen2.5-VL-7B", "2dedcb3c4ed298c96f3174771b96288078d469ee"),
     "visionrl2_7b": ("YuhengSSS/VisionRL2-Qwen2.5-VL-7B", "47d656abd90a837d902d296c4f986ca6acc7415d"),
 }
+PROCESSOR = ("Qwen/Qwen2.5-VL-7B-Instruct", "cc594898137f460bfe9f0759e9844b3ce807cfb5")
+PROCESSOR_FILES = ("chat_template.json", "config.json", "preprocessor_config.json", "tokenizer.json",
+                   "tokenizer_config.json", "merges.txt", "vocab.json")
 # Hugging Face lists identical LFS SHA-256 values for these three model shards.
 SHARED_SHARDS = [f"model-{index:05d}-of-00004.safetensors" for index in (1, 2, 3)]
 DATA_REVISION = "a947010b7014e35c6b0b492f10814990f1ab7c96"
@@ -52,9 +55,16 @@ def prepare(root):
             if not all((path / name).is_file() for name in set(index["weight_map"].values())):
                 raise ValueError(f"Incomplete checkpoint: {path}")
             checkpoints[arm] = path
+        processor_name, processor_revision = PROCESSOR
+        processor = Path(snapshot_download(
+            processor_name, revision=processor_revision, cache_dir=cache,
+            allow_patterns=list(PROCESSOR_FILES), max_workers=2,
+        ))
+        if not all((processor / name).is_file() for name in PROCESSOR_FILES):
+            raise ValueError(f"Incomplete Qwen2.5-VL-7B processor: {processor}")
         training = [Path(hf_hub_download("YuhengSSS/VisionRL2-data", file, repo_type="dataset",
                                          revision=DATA_REVISION, cache_dir=cache)) for file in DATA_FILES]
-    return vendor, checkpoints, training
+    return vendor, checkpoints, processor, training
 
 
 if __name__ == "__main__":
