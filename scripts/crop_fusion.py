@@ -49,7 +49,7 @@ FALLBACK_ARM = {
 class FusionQwen(Qwen):
     """Use native ordered image placeholders and preserve a grid for each image."""
 
-    def prepare_views(self, views, question):
+    def prepare_views(self, views, question, *, exact_budget=True):
         messages = [{"role": "user", "content": [
             *({"type": "image"} for _ in views),
             {"type": "text", "text": self.config["prompt"].format(question=question)},
@@ -62,7 +62,9 @@ class FusionQwen(Qwen):
         image_id = self.model.config.image_token_id
         spans = [sum(1 for _ in span) for visual, span in groupby(batch["input_ids"][0].tolist(),
                                                                 key=lambda token: token == image_id) if visual]
-        if grids != expected or spans != [h * w for h, w in grids] or sum(spans) != TOTAL_TOKENS:
+        if spans != [h * w for h, w in grids]:
+            raise RuntimeError("Qwen processor changed the ordered view grids")
+        if exact_budget and (grids != expected or sum(spans) != TOTAL_TOKENS):
             raise RuntimeError("Qwen processor changed the ordered view grids or exact visual token budget")
         return {name: tensor.to(self.device) for name, tensor in batch.items()}, grids
 

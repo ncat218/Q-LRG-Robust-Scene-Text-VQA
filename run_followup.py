@@ -11,7 +11,8 @@ from pathlib import Path
 from run_all import REPO, WITH_SLURM, write_script
 
 
-JOBS = {"restoration": "qlrg-blur-eval", "crop": "qlrg-crop-selectors"}
+JOBS = {"restoration": "qlrg-blur-eval", "crop": "qlrg-crop-selectors",
+        "crop_restore": "qlrg-crop-s1b"}
 
 
 def submit(mode, settings, source, dry_run=False):
@@ -21,10 +22,13 @@ def submit(mode, settings, source, dry_run=False):
     python = Path(settings["env"]) / "bin/python"
     required = [python, Path(settings["paths"]), Path(settings["data_dir"]) / "official_val.json",
                 Path(settings["s1_run"]) / "s1/COMPLETE.json"]
-    if mode == "crop":
+    if mode in ("crop", "crop_restore"):
         required.extend([source / "COMPLETE.json", source / "run.json"])
-        if not (source / "sdrpn-proposals").is_dir():
+        if mode == "crop" and not (source / "sdrpn-proposals").is_dir():
             raise FileNotFoundError(source / "sdrpn-proposals")
+    if mode == "crop_restore":
+        benchmark = Path(settings["selector_benchmark"])
+        required.extend(benchmark / name for name in ("COMPLETE.json", "run.json", "predictions.jsonl"))
     for path in required:
         if not path.is_file():
             raise FileNotFoundError(path)
@@ -45,10 +49,11 @@ def submit(mode, settings, source, dry_run=False):
     ])
     logs = run / "logs"
     logs.mkdir()
+    walltime = "00:30:00" if mode == "crop_restore" and settings.get("smoke_images") else "16:00:00"
     command = ["sbatch", "--parsable", f"--chdir={REPO}", f"--job-name={JOBS[mode]}",
                f"--account={resources['account']}", f"--partition={resources['partition']}",
                f"--qos={resources['qos']}", f"--gres={resources['gres']}", "--cpus-per-task=4",
-               "--mem=48G", "--time=16:00:00", f"--output={logs}/%x-%j.out",
+               "--mem=48G", f"--time={walltime}", f"--output={logs}/%x-%j.out",
                f"--error={logs}/%x-%j.err", str(script)]
     print(f"{mode}: {run}", flush=True)
     if dry_run:
@@ -63,6 +68,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=("both", *JOBS), default="both")
     parser.add_argument("--from-confirm", type=Path, required=True)
+    parser.add_argument("--selector-benchmark", type=Path, help="Completed official selector benchmark (crop_restore)")
+    parser.add_argument("--smoke-images", type=int, help="Limit a crop_restore smoke to this many images")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     if os.environ.get("SLURM_JOB_ID"):
@@ -71,7 +78,13 @@ def main():
     settings = json.loads((source / "launch.json").read_text(encoding="utf-8"))
     if not settings.get("confirm_a2_fusion") or settings["split"] != "official_val":
         parser.error("Use the locked A2 official validation run as the source")
-    for mode in JOBS if args.mode == "both" else (args.mode,):
+    if args.mode == "crop_restore":
+        if args.selector_benchmark is None or (args.smoke_images is not None and args.smoke_images < 1):
+            parser.error("crop_restore requires --selector-benchmark and a positive smoke size if supplied")
+        settings.update(selector_benchmark=str(args.selector_benchmark.resolve()), smoke_images=args.smoke_images)
+    elif args.selector_benchmark is not None or args.smoke_images is not None:
+        parser.error("Selector benchmark and smoke options apply only to crop_restore")
+    for mode in ("restoration", "crop") if args.mode == "both" else (args.mode,):
         submit(mode, settings, source, args.dry_run)
 
 

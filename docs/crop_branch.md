@@ -261,3 +261,24 @@ S1 checkpoints referenced by the completed confirmation run.
   `python -m scripts.selector_assets local/visionrl2`. A file lock protects
   the cache. The audit covers released VisualCoT candidate and 7B RL pools,
   with incomplete coverage of upstream SD-RPN training data.
+
+## Vision-RL² versus Danh's SD-RPN with S1b
+
+Use the completed 13054 benchmark as the source of padded boxes. The two
+selectors share the official validation cohort, LR4 images, A2 reader and
+S1b checkpoint. The benchmark crosses crop-only (576 tokens), fair fusion
+(288 full + 288 crop), and native fusion (Qwen's normal resolution per view)
+with S1b off or applied only to the crop. A missing crop falls back to the
+matching full-image baseline.
+
+```bash
+python3 run_followup.py --mode crop_restore \
+  --from-confirm runs/a2-fusion-official-20261110T115853Z-k5mhzwkw \
+  --selector-benchmark runs/crop-benchmark-02j6px_m \
+  --smoke-images 12
+```
+
+For the full benchmark, omit `--smoke-images 12`. Results include actual
+token counts and latency percentiles, paired accuracy intervals, and the
+difference in S1b gains between the two selectors. The primary denominator
+is 5,000 questions. The shared-box and TextOCR slices are diagnostic.
