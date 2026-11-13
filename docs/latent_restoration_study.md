@@ -83,3 +83,8 @@ and pixel restoration outputs are background literature only for this study.
 - *Pixel Distillation*. [arXiv:2112.09532](https://arxiv.org/abs/2112.09532). *FeatUp*. [arXiv:2403.10516](https://arxiv.org/abs/2403.10516). *AnyUp*. [arXiv:2510.12764](https://arxiv.org/abs/2510.12764).
 - *TG-LLaVA*. [arXiv:2409.09564](https://arxiv.org/abs/2409.09564). *QA-ViT*. [arXiv:2402.05472](https://arxiv.org/abs/2402.05472). *iGVLM*. [arXiv:2603.02748](https://arxiv.org/abs/2603.02748).
 - Vatsi et al. 2026. *Beyond OCR Accuracy: Text-Centric VQA Under Image Degradation with Modular and End-to-End*. [arXiv:2609.13815](https://arxiv.org/abs/2609.13815).
+
+Use `--grouped --time 2-00:00:00` to run these methods serially in one
+Slurm allocation. Each method writes into its own subdirectory, including
+`worker.log` and its checkpoint. The batch continues with the remaining
+methods if one fails and exits nonzero if any method did not finish.
