@@ -13,6 +13,8 @@ from qlrg.common import object_hash, read_json, read_jsonl, sha256, write_json
 from qlrg.evaluation import SCORER_REVISION, evaluator, paired_bootstrap
 from qlrg.experiment import paired_images
 from qlrg.s1_run import make_adapter
+from scripts.crop_benchmark import answer_polygons
+from scripts.crop_followup import TEXTOCR_VAL_SHA256, validation_ocr
 from scripts.crop_fusion import FusionQwen, TOTAL_TOKENS, VIEW_TOKENS, fit_token_canvas
 from scripts.followup_common import bind, finish, load_study, write_table
 
@@ -148,7 +150,7 @@ def predict_image(model, restorer, scorer, image, proposals, root, checked_layou
     return {"rows": rows, "identity": gates}
 
 
-def report(output, rows, manifest, seed, identity, smoke):
+def report(output, rows, manifest, seed, identity, smoke, textocr_questions):
     cases = [(im["image_id"], q["question_id"]) for im in manifest["images"] for q in im["questions"]]
     by_arm = {arm: [] for arm in ARMS}
     for row in rows:
@@ -186,11 +188,33 @@ def report(output, rows, manifest, seed, identity, smoke):
                  for s in SELECTORS for flag in RESTORE)
     pairs.extend(("full_native" if layout == "fusion_native" else "full576", arm_id(s, layout, flag))
                  for s in SELECTORS for layout in LAYOUTS for flag in RESTORE)
+    textocr = [i for i, (_, qid) in enumerate(cases) if qid in textocr_questions]
+    if not textocr and not smoke:
+        raise ValueError("No TextOCR-grounded official validation questions")
     common = [i for i in range(len(cases)) if all(by_arm[arm_id(s, "crop576", "off")][i]["crop_xyxy"]
                                                 is not None for s in SELECTORS)]
     grounded = [i for i in common if all(
         (by_arm[arm_id(s, "crop576", "off")][i]["textocr_retained"] or 0) >= 0.9 for s in SELECTORS)]
-    cohorts = {"all": list(range(len(cases))), "both_boxes": common, "both_retain_90pct": grounded}
+    cohorts = {"all": list(range(len(cases))), "textocr_grounded": textocr,
+               "both_boxes": common, "both_retain_90pct": grounded}
+    coverage = []
+    if textocr:
+        groups = [cases[i][0] for i in textocr]
+        retained = {}
+        for selector in SELECTORS:
+            selected = [by_arm[arm_id(selector, "crop576", "off")][i] for i in textocr]
+            retained[selector] = [int((row["textocr_retained"] or 0) >= 0.9) for row in selected]
+            coverage.append({
+                "selector": selector, "questions": len(selected), "images": len(set(groups)),
+                "no_box": sum(row["crop_xyxy"] is None for row in selected),
+                "retains_90pct": sum(retained[selector]), "retains_90pct_pct": 100 * mean(retained[selector]),
+                **paired_bootstrap(retained[SELECTORS[0]], retained[selector], groups, 10000, seed),
+            })
+        write_table(output / "textocr_coverage.csv", coverage)
+        write_table(output / "accuracy_textocr.csv", [
+            {"arm": arm, "questions": len(textocr), "images": len(set(groups)),
+             "accuracy_pct": float(scores[arm][textocr].mean() * 100)} for arm in ARMS
+        ])
     comparisons, interactions = [], []
     for cohort, indexes in cohorts.items():
         if not indexes:
@@ -208,9 +232,13 @@ def report(output, rows, manifest, seed, identity, smoke):
     write_table(output / "accuracy.csv", metrics)
     write_table(output / "paired.csv", comparisons)
     write_table(output / "restoration_interaction.csv", interactions)
+    if textocr:
+        write_table(output / "paired_textocr.csv",
+                    [row for row in comparisons if row["cohort"] == "textocr_grounded"])
     return {"split": manifest["split"], "smoke": smoke, "questions": len(cases), "images": len(manifest["images"]),
             "cohorts": {name: len(i) for name, i in cohorts.items()}, "accuracy": metrics,
             "comparisons": comparisons, "restoration_interaction": interactions,
+            "textocr_coverage": coverage,
             "identity": identity, "bootstrap_unit": "image_id", "bootstrap_resamples": 10000,
             "scorer_revision": SCORER_REVISION}
 
@@ -223,12 +251,16 @@ def run(output):
         expected = {(im["image_id"], q["question_id"]) for im in manifest["images"] for q in im["questions"]}
         if any(entries.keys() != expected for entries in proposals.values()):
             raise ValueError("Archived box results do not cover the 5,000 official questions")
+        textocr_questions = answer_polygons(manifest, validation_ocr(Path(launch["repo"])))
+        if not textocr_questions:
+            raise ValueError("TextOCR validation has no grounded questions")
+        print(f"TextOCR grounding: {len(textocr_questions)}/{len(expected)} official questions", flush=True)
         smoke_images = launch.get("smoke_images")
         if smoke_images is not None:
             manifest = {**manifest, "images": manifest["images"][:smoke_images]}
         binding.update({"selector_benchmark": str(source), "selector_binding": object_hash(archived),
                         "smoke_images": smoke_images, "arms": list(ARMS), "native_max_pixels_per_view": config["max_pixels"],
-                        "worker_sha256": sha256(Path(__file__))})
+                        "textocr_val_sha256": TEXTOCR_VAL_SHA256, "worker_sha256": sha256(Path(__file__))})
         bind(output, binding)
         model = FusionQwen(config, paths["hf_hub"])
         torch.backends.cuda.matmul.allow_tf32 = False
@@ -251,7 +283,8 @@ def run(output):
                 identity.update(batch["identity"])
                 if index <= 3 or index % 50 == 0 or index == len(manifest["images"]):
                     print(f"Crop S1b: {index}/{len(manifest['images'])} images, gates: {sorted(identity)}", flush=True)
-        finish(output, binding, report(output, rows, manifest, launch["seed"], identity, smoke_images is not None),
+        finish(output, binding, report(output, rows, manifest, launch["seed"], identity,
+                                       smoke_images is not None, textocr_questions),
                rows)
 
 
