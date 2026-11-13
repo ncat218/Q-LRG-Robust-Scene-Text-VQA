@@ -129,7 +129,7 @@ def loss_for(qwen, arm, adapter, cache, question, condition, answer, config):
     return loss
 
 
-def train(qwen, arm, adapter, cache, examples, config, path, fingerprint):
+def train(qwen, arm, adapter, cache, examples, config, path, fingerprint, *, objective=loss_for):
     optimizer = torch.optim.AdamW(adapter.parameters(), lr=config["learning_rate"], weight_decay=config["weight_decay"])
     offset, history = 0, []
     if path.is_file():
@@ -159,7 +159,7 @@ def train(qwen, arm, adapter, cache, examples, config, path, fingerprint):
             total = torch.zeros((), device=qwen.device)
             for image, question, condition, answer in group:
                 cache.load(image)
-                loss = loss_for(qwen, arm, adapter, cache, question, condition, answer, config)
+                loss = objective(qwen, arm, adapter, cache, question, condition, answer, config)
                 (loss / len(group)).backward()
                 total += loss.detach()
             norm = float(torch.nn.utils.clip_grad_norm_(

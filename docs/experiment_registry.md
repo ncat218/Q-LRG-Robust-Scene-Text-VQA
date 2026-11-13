@@ -31,3 +31,10 @@ Completed rows reference immutable run directories on UIT-HPC. The job number an
 - Multi-epoch, learning-rate and seed studies, including CLEAN-only controls, remain pending resource review. S2/S3 are deferred under the current decision rule.
 
 The [audit decision rules](audit_decision_rules.md) fix interpretation before accepting the next audit result and specify the subsequent S0 controls and S1 feature diagnostics.
+
+## Latent restoration ablations
+
+The [study and citation registry](latent_restoration_study.md) records the
+matched S1b control, six post-Merger variants, and the remaining architecture
+experiments. Report each variant by CLI method, train/eval split, seed and
+citation registry hash.
