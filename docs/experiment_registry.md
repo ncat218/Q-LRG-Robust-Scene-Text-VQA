@@ -1,5 +1,25 @@
 # Q-LRG experiment registry
 
+## Current full-image comparison, 2026-11-18
+
+The table below records the latest full-image workflow. Older planned rows
+refer to the protocol at the time they were written.
+
+| Job | Status at last check | Purpose and evidence |
+| --- | --- | --- |
+| 42176 | Completed | Re-score S1b job 11305 and the 4,000-image S1b from 18970 on the same 3,473 val_inner questions. The full-data checkpoint scored 67.35% LR4 versus 65.68% A0, +1.67 pp [0.73, 2.60]. |
+| 18970 | Completed | Matched 4,000-image/one-epoch post-Merger screening. All six variants scored below the matched S1b checkpoint on LR4. One seed. |
+| 42415 | Completed, comparability unresolved | Pre and Post used 19,758 images/two epochs, but Post did not reproduce job 11305. Treat the site ranking as exploratory until the old S1b protocol is matched. |
+| 48633 | Running | Pre-Merger restoration using job 11305's manifests, loss implementation, optimizer and two-epoch exposure. Feature/logit parity and gradient checks passed. `runs/pre-11305-pWZx2Ojh/` |
+| 52963 | Submitted, afterok:48633 | Locked A0/S1b/Pre/A2 evaluation on 5,000 official validation questions, CLEAN and LR4. Produces paired CI, error-review worksheets, inference cost and a demo. `runs/final-tooling-xszFH1L0/runs/final-official_val-5zxrc8y1/` |
+
+The [final evaluation workflow](final_study.md) defines outputs, commands,
+cohorts and limits. Official validation has already been used in earlier
+project experiments. This round compares fixed checkpoints. It is not a
+previously unseen holdout. Error-cause fields stay unreviewed until manual
+inspection. Inference cost uses a fixed image subset, while accuracy uses
+the complete declared evaluation cohort.
+
 Completed rows reference immutable run directories on UIT-HPC. The job number and artifact paths locate evidence. Per-question predictions, manifests and checkpoints stay with the run. Add a new row when changing code, preprocessing, cohort, grounding policy, or model. Record the manifest and source hashes, checkpoint/model revision, seed, comparison, paired interval and measured cost in the run metadata.
 
 | Experiment | Status | Cohort and reference | Evidence |

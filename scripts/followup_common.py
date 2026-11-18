@@ -9,10 +9,11 @@ from qlrg.common import atomic_write, dataset_paths, object_hash, read_config, r
 from qlrg.data import verify_pillow
 from qlrg.s1_manifests import read_s1_manifests
 from qlrg.s1_run import runtime_shared
-from scripts.query_crop import checkpoints_for
 
 
 def load_study(output, mode, arms):
+    from scripts.query_crop import checkpoints_for
+
     if not os.environ.get("SLURM_JOB_ID"):
         raise RuntimeError("Run this worker in a Slurm GPU allocation")
     verify_pillow()
