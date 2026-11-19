@@ -1,0 +1,16 @@
+{
+  "seed": 42,
+  "max_epochs": 8,
+  "min_epochs": 2,
+  "evaluate_every_epoch_fraction": 0.5,
+  "patience": 4,
+  "min_delta_pp": 0.1,
+  "clean_tolerance_pp": 1.0,
+  "learning_rate": 0.0002,
+  "accumulate": 4,
+  "checkpoint_every_updates": 2000,
+  "refit_official_train": true,
+  "initialization": "fresh_same_seed",
+  "feature_disk_cache": false,
+  "retained_checkpoints_per_view_per_stage": 2
+}
