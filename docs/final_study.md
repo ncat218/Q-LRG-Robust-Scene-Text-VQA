@@ -4,6 +4,11 @@ Mục tiêu là đánh giá phục hồi latent toàn ảnh trên TextVQA LR4 v�
 trước/sau Merger. Bốn cấu hình được chọn trước khi xem bảng điểm validation
 chính thức của lượt này.
 
+Job 48633 và 52963 đã hoàn tất. [Báo cáo đồ án](course_project_report.md)
+tổng hợp protocol và kết quả cuối. [EDA 36 ca](eda_reviewed_36.md) ghi các
+quan sát sau khi xem ảnh. [Runbook demo](demo_runbook.md) ghi trạng thái
+kiểm chứng CLI H200 và các lệnh tái lập.
+
 | Cấu hình | Cơ chế | Nguồn checkpoint |
 | --- | --- | --- |
 | A0 | Qwen2.5-VL-3B đóng băng | Model revision trong `configs/model_qwen.yaml` |

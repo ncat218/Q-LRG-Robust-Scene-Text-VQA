@@ -20,6 +20,14 @@ previously unseen holdout. Error-cause fields stay unreviewed until manual
 inspection. Inference cost uses a fixed image subset, while accuracy uses
 the complete declared evaluation cohort.
 
+On 2026-11-19, [36 selected cases were visually reviewed](eda_reviewed_36.md)
+using CLEAN/LR4 images and predictions. This purposive sample supports
+qualitative observations, not estimates of error-type prevalence. The
+[course report](course_project_report.md) consolidates the final protocol,
+results and limitations. Job 63914, the live CLI check on three benchmark
+images, is pending due to AssocGrpJobsLimit. The [demo runbook](demo_runbook.md)
+records the commands and remaining GPU verification.
+
 Completed rows reference immutable run directories on UIT-HPC. The job number and artifact paths locate evidence. Per-question predictions, manifests and checkpoints stay with the run. Add a new row when changing code, preprocessing, cohort, grounding policy, or model. Record the manifest and source hashes, checkpoint/model revision, seed, comparison, paired interval and measured cost in the run metadata.
 
 | Experiment | Status | Cohort and reference | Evidence |
