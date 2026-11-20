@@ -76,7 +76,9 @@ feature cache hàng trăm GB. Bản gốc 11305 và kết quả cũ được gi�
 
 - Kiểm provenance/SHA-256 A2, số lượt học và binding với source 11305.
 - Kiểm prefill identity khi delta=0 và gradient qua A2 đóng băng trước khi
-  đo baseline dài. Gradient phải tới module visual; không tới trọng số reader.
+  đo baseline dài. Kiểm riêng gradient của **loss đáp án**, để loss MSE không
+  che giấu trường hợp đường qua LLM bị ngắt. Gradient phải tới module visual;
+  không tới trọng số reader.
 - Kiểm `requires_grad`, parameter gradients và digest trọng số A2 khi lưu
   định kỳ, sau validation và cuối mỗi giai đoạn. Optimizer chỉ chứa module visual.
 - Log loss đáp án, feature loss, residual loss, gradient norm và peak VRAM.

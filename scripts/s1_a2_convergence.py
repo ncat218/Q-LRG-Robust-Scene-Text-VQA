@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import json
+import math
 import os
 import subprocess
 import sys
@@ -96,11 +97,18 @@ def gradient_probe(model,adapter,cache,config,question):
     answer=next(a.strip() for a in question['answers'] if a.strip())
     with text_training(model.model,True):
         loss,match,task,residual=restoration_objective(model,adapter,cache,question,'LR4',answer,config)
+        if not task.requires_grad:raise RuntimeError('No answer-loss gradient path through frozen A2')
+        task_grads=torch.autograd.grad(task,tuple(adapter.parameters()),retain_graph=True,allow_unused=True)
+        active=[g for g in task_grads if g is not None]
+        task_norm=float(torch.stack([g.detach().float().norm() for g in active]).norm()) if active else 0.
+        if not math.isfinite(task_norm) or task_norm<=0:
+            raise RuntimeError('Answer loss supplies no nonzero gradient through frozen A2')
         loss.backward()
         norm=float(torch.nn.utils.clip_grad_norm_(adapter.parameters(),1.,error_if_nonfinite=True))
         if norm<=0:raise RuntimeError('No visual-module gradients through frozen A2')
         adapter.zero_grad(set_to_none=True)
     return {'passed':True,'grad_norm':norm,'loss':float(loss.detach()),
+            'task_grad_norm':task_norm,
             'task_loss':float(task.detach()),'feature_mse':float(match.detach()),
             'feature_weight':config['feature_weight'],'reader':'A2','frozen_reader':True}
 

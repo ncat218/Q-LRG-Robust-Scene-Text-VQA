@@ -1,4 +1,5 @@
 import copy
+from contextlib import nullcontext
 import json
 import tempfile
 import unittest
@@ -11,7 +12,7 @@ from torch import nn
 
 from qlrg.s1_model import LanguageLoRA, LoRALinear, VisualResidual
 from scripts.s1_a2_convergence import (assert_fixed_reader, baseline_once,
-                                      method_config, module_digest, validate_study)
+                                      gradient_probe, method_config, module_digest, validate_study)
 from scripts.s1_convergence import restoration_objective
 
 
@@ -71,9 +72,35 @@ class A2ConvergenceTests(unittest.TestCase):
                     values.append(torch.autograd.grad(loss,adapter.output.bias)[0])
                 gradients[method]=values
         torch.testing.assert_close(*gradients['ce_only'],atol=0,rtol=0)
+        self.assertGreater(float(gradients['ce_only'][0].norm()),0.)
         self.assertFalse(torch.equal(*gradients['restoration']))
         self.assertEqual(original['feature_weight'],1.)
         self.assertEqual(method_config(original,'ce_only')['clean_residual_weight'],.1)
+
+    def test_probe_rejects_disconnected_answer_loss_even_if_mse_has_gradients(self):
+        model,lora,attention=self.fake_qwen()
+        model.prefill_logits=lambda *args:torch.zeros(1)
+        adapter=VisualResidual(4,3,1);base=torch.randn(4,4)
+        cache=SimpleNamespace(features={'LR4':base,'CLEAN':base+.5},grid=(2,2),prompt=lambda *args:{})
+        config={'max_answer_tokens':8,'feature_weight':1.,'residual_weight':.01,'clean_residual_weight':.1}
+        question={'question':'Who?','answers':['wallace']}
+        with lora.attached(),patch('scripts.s1_a2_convergence.text_training',return_value=nullcontext()):
+            with patch('scripts.s1_convergence.teacher_forced_loss',return_value=torch.tensor(1.)):
+                with self.assertRaisesRegex(RuntimeError,'answer-loss gradient path'):
+                    gradient_probe(model,adapter,cache,config,question)
+        adapter.zero_grad(set_to_none=True)
+
+    def test_probe_measures_answer_gradient_with_frozen_a2(self):
+        model,lora,attention=self.fake_qwen()
+        model.prefill_logits=lambda *args:torch.zeros(1)
+        adapter=VisualResidual(4,3,1);base=torch.randn(4,4)
+        cache=SimpleNamespace(features={'LR4':base,'CLEAN':base+.5},grid=(2,2),prompt=lambda *args:{})
+        config={'max_answer_tokens':8,'feature_weight':1.,'residual_weight':.01,'clean_residual_weight':.1}
+        teacher=lambda q,p,f,t:attention.q_proj(f).square().mean()
+        with lora.attached(),patch('scripts.s1_a2_convergence.text_training',return_value=nullcontext()),patch('scripts.s1_convergence.teacher_forced_loss',side_effect=teacher):
+            result=gradient_probe(model,adapter,cache,config,{'question':'Who?','answers':['wallace']})
+        self.assertGreater(result['task_grad_norm'],0.)
+        self.assertTrue(all(p.grad is None for p in lora.parameters()))
 
     def test_reader_guard_detects_trainable_or_changed_a2(self):
         model,lora,_=self.fake_qwen();digest=module_digest(lora)
