@@ -133,16 +133,30 @@ class Features:
 def save_checkpoint(path,adapter,optimizer,binding,offset,policy,history):
     buffer=io.BytesIO()
     torch.save({'binding':object_hash(binding),'arm':'S1b','adapter':adapter.state_dict(),
+                'method':binding.get('method','restoration'),'reader':binding.get('reader','A0'),
                 'optimizer':optimizer.state_dict(),'examples':offset,
                 'selection':policy.state_dict() if policy else None,'history':history,
                 'cpu_rng':torch.get_rng_state(),'cuda_rng':torch.cuda.get_rng_state()},buffer)
     atomic_write(path,buffer.getvalue())
 
 
+def restoration_objective(model,adapter,cache,question,condition,answer,config):
+    """The same spatial module and task loss; feature_weight=0 is the CE control."""
+    restored,delta=adapter(cache.features[condition],cache.grid)
+    match=F.mse_loss(restored,cache.features['CLEAN'].float())
+    tokenizer=model.processor.tokenizer
+    tokens=tokenizer.encode(answer,add_special_tokens=False)[:config['max_answer_tokens']]
+    tokens.append(tokenizer.eos_token_id)
+    task=teacher_forced_loss(model,cache.prompt(condition,question['question']),restored.to(model.dtype),tokens)
+    residual=delta.square().mean()
+    weight=config['residual_weight']+(config.get('clean_residual_weight',0) if condition=='CLEAN' else 0)
+    return task+config['feature_weight']*match+weight*residual,match,task,residual
+
+
 @torch.inference_mode()
 def evaluate(model,adapter,cache,manifest,scorer,baseline=False):
     adapter.eval();rows=[]
-    for image in manifest['images']:
+    for index,image in enumerate(manifest['images'],1):
         for question in image['questions']:
             cache.load(image,question)
             refs=scorer._compute_answer_scores(question['answers'])
@@ -153,12 +167,18 @@ def evaluate(model,adapter,cache,manifest,scorer,baseline=False):
                 rows.append({'image_id':image['image_id'],'question_id':question['question_id'],
                              'condition':condition,'answer':result['answer'],
                              'score':refs.get(scorer.answer_processor(result['answer']),0.0),
-                             'visual_tokens':len(base),'crop_xyxy':cache.box})
+                             'visual_tokens':len(base),'crop_xyxy':cache.box,
+                             'feature_mse':float(F.mse_loss(value.float(),cache.features['CLEAN'].float())),
+                             'raw_feature_mse':float(F.mse_loss(base.float(),cache.features['CLEAN'].float())),
+                             'residual_norm_ratio':float((value.float()-base.float()).norm()/base.float().norm().clamp_min(1e-8)),
+                             'answer_tokens':len(result.get('token_ids',[]))})
+        if index<=2 or index%250==0 or index==len(manifest['images']):
+            print(f"Validate {getattr(cache,'label',cache.view)} {'baseline' if baseline else 'restored'}: {index}/{len(manifest['images'])} images",flush=True)
     scores={c:100*sum(r['score'] for r in rows if r['condition']==c)/(len(rows)//2) for c in ('CLEAN','LR4')}
     return scores,rows
 
 
-def train_stage(model,cache,adapter,records,dev,base_config,settings,directory,binding,refit_visits=None):
+def train_stage(model,cache,adapter,records,dev,base_config,settings,directory,binding,refit_visits=None,baseline_result=None,reader_guard=None):
     directory.mkdir(parents=True,exist_ok=True)
     if (directory/'COMPLETE.json').exists():
         done=read_json(directory/'COMPLETE.json')
@@ -184,7 +204,7 @@ def train_stage(model,cache,adapter,records,dev,base_config,settings,directory,b
         if not 0<=offset<=len(examples) or (offset!=len(examples) and offset%accumulate):
             raise ValueError('Invalid resume offset')
     elif refit_visits is None:
-        baseline,rows=evaluate(model,adapter,cache,dev,scorer,baseline=True)
+        baseline,rows=baseline_result if baseline_result is not None else evaluate(model,adapter,cache,dev,scorer,baseline=True)
         write_json(directory/'baseline.json',baseline);write_jsonl(directory/'baseline_predictions.jsonl',rows)
         policy=Selection(baseline_clean=baseline['CLEAN'],clean_tolerance_pp=settings['clean_tolerance_pp'],
                          min_delta_pp=settings['min_delta_pp'],patience=settings['patience'],min_epochs=settings['min_epochs'],
@@ -206,15 +226,7 @@ def train_stage(model,cache,adapter,records,dev,base_config,settings,directory,b
                     totals={'loss':0.,'feature_loss':0.,'task_loss':0.,'residual_loss':0.}
                     for image,question,condition,answer in group:
                         cache.load(image,question)
-                        restored,delta=adapter(cache.features[condition],cache.grid)
-                        match=F.mse_loss(restored,cache.features['CLEAN'].float())
-                        tokenizer=model.processor.tokenizer
-                        tokens=tokenizer.encode(answer,add_special_tokens=False)[:base_config['max_answer_tokens']]
-                        tokens.append(tokenizer.eos_token_id)
-                        task=teacher_forced_loss(model,cache.prompt(condition,question['question']),restored.to(model.dtype),tokens)
-                        residual=delta.square().mean()
-                        weight=base_config['residual_weight']+(base_config.get('clean_residual_weight',0) if condition=='CLEAN' else 0)
-                        loss=task+base_config['feature_weight']*match+weight*residual
+                        loss,match,task,residual=restoration_objective(model,adapter,cache,question,condition,answer,base_config)
                         (loss/len(group)).backward()
                         for key,value in zip(totals,(loss,match,task,residual)):totals[key]+=float(value.detach())/len(group)
                     norm=float(torch.nn.utils.clip_grad_norm_(adapter.parameters(),base_config['max_grad_norm'],error_if_nonfinite=True))
@@ -228,23 +240,29 @@ def train_stage(model,cache,adapter,records,dev,base_config,settings,directory,b
                         entry.update(examples=offset,epoch=offset/examples_per_epoch,grad_norm=norm,
                                      peak_cuda_bytes=torch.cuda.max_memory_allocated())
                         history.append(entry);window=[]
-                        print(f"{cache.view}: {offset}/{len(examples)} visits, epoch {entry['epoch']:.3f}, loss {entry['loss']:.4f}",flush=True)
+                        print(f"{binding.get('reader','A0')}/{cache.view}/{binding.get('method','restoration')}: {offset}/{len(examples)} visits, epoch {entry['epoch']:.3f}, loss {entry['loss']:.4f}",flush=True)
                     if updates%settings['checkpoint_every_updates']==0 or interrupted[0]:
+                        if reader_guard is not None:reader_guard()
                         save_checkpoint(latest,adapter,optimizer,binding,offset,policy,history)
                     if interrupted[0]:raise SystemExit('Saved latest checkpoint on termination; resume this run')
             optimizer.zero_grad(set_to_none=True)
             if refit_visits is None:
                 scores,rows=evaluate(model,adapter,cache,dev,scorer)
+                if reader_guard is not None:reader_guard()
                 decision=policy.observe(scores['LR4'],scores['CLEAN'],offset,offset/examples_per_epoch)
                 entry={'examples':offset,'epoch':offset/examples_per_epoch,**scores,**decision,
                        'best_lr4':policy.best_lr4,'best_examples':policy.best_examples,'bad_checks':policy.bad_checks}
+                for condition in ('CLEAN','LR4'):
+                    selected_rows=[r for r in rows if r['condition']==condition]
+                    for metric in ('feature_mse','raw_feature_mse','residual_norm_ratio','answer_tokens'):
+                        entry[condition+'_'+metric]=sum(r[metric] for r in selected_rows)/len(selected_rows)
                 write_json(directory/f'eval-{offset:08d}.json',entry)
                 write_jsonl(directory/'latest_predictions.jsonl',rows)
                 if decision['save_best']:
                     save_checkpoint(best,adapter,optimizer,binding,offset,policy,history)
                     write_jsonl(directory/'best_predictions.jsonl',rows)
                 stopping=decision['stop']
-                print(f"{cache.view} validation: {entry}",flush=True)
+                print(f"{binding.get('reader','A0')}/{cache.view}/{binding.get('method','restoration')} validation: {entry}",flush=True)
             save_checkpoint(latest,adapter,optimizer,binding,offset,policy,history)
     finally:signal.signal(signal.SIGTERM,old_handler)
     done={'binding':object_hash(binding),'reason':'early_stopping' if stopping else 'fixed_refit_duration' if refit_visits is not None else 'epoch_cap',

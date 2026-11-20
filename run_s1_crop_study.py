@@ -30,13 +30,14 @@ def prepare(args):
         launch={**settings,'repo':str(REPO),'study':args.mode,'split':'official_val',
                 'readers':['A0','A2'],'smoke_images':args.smoke_images,'flops_images':3,
                 'selector_benchmark':settings['selector_benchmark'],'source':str(source)}
-        if args.mode=='s1_convergence':
+        if args.mode in ('s1_convergence','s1_a2_convergence'):
             if args.train_config is None:
                 raise ValueError('Convergence training requires --train-config')
             launch['train_config']=json.loads(args.train_config.read_text(encoding='utf-8'))
             launch['selector_assets']=str(args.selector_assets.resolve()) if args.selector_assets else str(
                 Path(settings['repo'])/'local/visionrl2')
             launch['train_view']=args.view
+            if args.mode=='s1_a2_convergence':launch['readers']=['A2']
         if not args.dry_run:
             (output/'launch.json').write_text(json.dumps(launch,indent=2)+'\n',encoding='utf-8')
     required=[Path(launch['env'])/'bin/python',Path(launch['paths']),
@@ -51,7 +52,7 @@ def prepare(args):
 
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--mode',choices=('crop_matrix','s1_convergence'),required=True)
+    parser.add_argument('--mode',choices=('crop_matrix','s1_convergence','s1_a2_convergence'),required=True)
     group=parser.add_mutually_exclusive_group(required=True)
     group.add_argument('--from-run',type=Path)
     group.add_argument('--resume',type=Path)
@@ -81,7 +82,7 @@ def main():
         'exec '+shlex.join([str(python),'-B','-m','scripts.'+args.mode,str(output)]),
     ]
     time=args.time or ('00:30:00' if launch.get('smoke_images') else
-                       '2-00:00:00' if args.mode=='s1_convergence' else '16:00:00')
+                       '2-00:00:00' if args.mode in ('s1_convergence','s1_a2_convergence') else '16:00:00')
     script=output/(args.mode+'.sbatch')
     if not args.dry_run:script=write_script(output,args.mode,commands)
     command=['sbatch','--parsable',f'--chdir={REPO}',f'--job-name=qlrg-{args.mode.replace("_","-")}',
