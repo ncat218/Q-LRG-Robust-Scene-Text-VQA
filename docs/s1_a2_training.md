@@ -110,3 +110,33 @@ python3 run_s1_crop_study.py --mode s1_a2_convergence \
 Đây là adaptation thử nghiệm Q-LRG, không phải tái hiện nguyên bài Latent
 Denoising hoặc MAA. Căn cứ paper, khác biệt cơ chế và các giả thuyết được lưu
 trong `docs/latent_restoration_study.md`, mục phối hợp phục hồi với A2.
+
+## Job đã nộp ngày 2026-11-20
+
+**Job 74081**, tên `qlrg-s1-a2-convergence`, trạng thái lúc nộp **PENDING
+(Priority)**. Đây là trạng thái tại thời điểm kiểm tra, không phải live status.
+20 unit tests CPU đã đạt trên môi trường HPC; kiểm tra GPU thật chạy đầu job.
+
+Snapshot code commit `cffa357`:
+`/datastore/dungmt/textvqa/Tuan/qlrg-a2-train-cffa357`
+
+Run:
+`/datastore/dungmt/textvqa/Tuan/qlrg-a2-train-cffa357/runs/s1_a2_convergence-6y3mfbix`
+
+Một allocation H200 MIG `gpu:2g.35gb:1`, partition `normal`, QoS `mig2-35`,
+8 CPU, 48 GiB RAM, walltime trần 72 giờ. Job này độc lập với 68269 đang chạy.
+Snapshot và launch/config của 68269 không bị chỉnh sửa.
+
+```bash
+sacct -j 74081 --format=JobID,JobName%25,State,ExitCode,Elapsed
+
+run=/datastore/dungmt/textvqa/Tuan/qlrg-a2-train-cffa357/runs/s1_a2_convergence-6y3mfbix
+tail -F "$run/logs/qlrg-s1-a2-convergence-74081.out" \
+        "$run/logs/qlrg-s1-a2-convergence-74081.err"
+cat "$run/progress.json"
+
+# Chỉ resume khi job cũ không còn active:
+cd /datastore/dungmt/textvqa/Tuan/qlrg-a2-train-cffa357
+python3 run_s1_crop_study.py --mode s1_a2_convergence \
+  --resume "$run" --time 3-00:00:00
+```
