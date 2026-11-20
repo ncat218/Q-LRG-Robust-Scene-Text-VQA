@@ -140,3 +140,26 @@ cd /datastore/dungmt/textvqa/Tuan/qlrg-a2-train-cffa357
 python3 run_s1_crop_study.py --mode s1_a2_convergence \
   --resume "$run" --time 3-00:00:00
 ```
+
+## Recovery sau job 74081
+
+74081 FAILED (1:0), elapsed 06:23:54. Log đã tới 40.000 mẫu nhưng `latest.pt`
+được xác nhận đọc được ở **32.000 mẫu (~1,028 epoch)**; đây là mốc resume thực.
+Best lúc đó vẫn là baseline A2, chưa có checkpoint train nào vượt baseline
+ở những lần validation đã lưu. Chưa có kết quả ce_only, crop hoặc refit.
+
+Job **81950** được nộp để tiếp tục cùng run từ latest, PENDING khi kiểm tra sau
+nộp. Không đổi source worker cũ, dữ liệu, loss, optimizer hoặc checkpoint binding.
+Recovery code nằm ở `/datastore/dungmt/textvqa/Tuan/qlrg-recovery-4a78a6c`.
+
+Traceback cũ bị cắt, chưa xác định được loại exception. Phép ghi/fsync ~12 MB
+hiện tại thành công; chưa có bằng chứng đủ để quy lỗi cho quota hay OOM.
+Bản recovery retry lỗi I/O và lưu exception type/message/frames độc lập dưới
+`/home/dungmt/.qlrg_recovery/s1_a2_convergence-6y3mfbix/`, cùng emergency
+checkpoint nếu checkpoint không ghi được sau retry. Đây là gia cố và phục hồi,
+không phải xác nhận nguyên nhân gốc đã được tìm ra.
+
+```bash
+run=/datastore/dungmt/textvqa/Tuan/qlrg-a2-train-cffa357/runs/s1_a2_convergence-6y3mfbix
+tail -F "$run/logs/qlrg-recover-81950.out" "$run/logs/qlrg-recover-81950.err"
+```

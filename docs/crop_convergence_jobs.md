@@ -135,3 +135,44 @@ Artifacts downloaded and verified locally under `local/crop-matrix-68268/`.
 python -B -m scripts.analyze_crop_matrix \
   --run local/crop-matrix-68268 --output local/crop-matrix-68268-analysis
 ```
+
+## Training failure and checkpoint recovery
+
+Checked again 2026-11-20: 68269 FAILED (1:0) after 09:39:26; 74081 FAILED
+(1:0) after 06:23:54. Neither finished selection/refit or crop training.
+Both stderr files were only 329 bytes and ended at the Traceback header,
+without an exception type/message or source frame. This does not establish
+an OOM, quota error or software exception. Node system logs were inaccessible
+to this account. Current 4 KiB and full-checkpoint-size (~12 MB) writes/fsync
+passed in both output directories, so current quota exhaustion was not observed.
+
+Validated latest checkpoints include model, optimizer, RNG, selection state and
+history. Bindings and original worker SHA-256 values match:
+
+| Old job | Latest example visits | Fractional epoch | Recovery job |
+|---|---:|---:|---|
+| 68269, S1b through A0 | 56,000 | 1.79897 | **81949** |
+| 74081, restoration through A2 | 32,000 | 1.02798 | **81950** |
+
+Both recovery jobs were PENDING (Priority) immediately after submission. They
+reuse the same run directories and original pinned workers/configurations;
+model/data/loss/optimizer/schedule are not changed, and training is not restarted.
+Work after those saved offsets must be repeated; stdout's later progress was
+not a recoverable checkpoint.
+
+Recovery snapshot `4a78a6c` adds explicit atomic-write retries on transient I/O
+errors, an independent exception journal, and a fixed emergency checkpoint
+backup only if all checkpoint-write retries fail. No claim is made that the
+unknown original root cause has been fixed. The improved observability will
+capture the actual exception if it recurs. Recovery behavior is recorded in
+each run's `recovery/launch.json` and `/home/dungmt/.qlrg_recovery/<run-name>/`.
+
+The recovery tests passed locally and on HPC, including preservation of an
+existing checkpoint when writes fail. CPU preflight verified that I/O aliases
+are patched while original source hashes and checkpoint bindings stay intact.
+
+```bash
+sacct -j 81949,81950 --format=JobID,JobName%35,State,ExitCode,Elapsed
+tail -F /datastore/dungmt/textvqa/Tuan/qlrg-s1-crop-81bcfd0/runs/s1_convergence-q8cefict/logs/qlrg-recover-81949.out \
+        /datastore/dungmt/textvqa/Tuan/qlrg-s1-crop-81bcfd0/runs/s1_convergence-q8cefict/logs/qlrg-recover-81949.err
+```
