@@ -87,3 +87,27 @@ python3 run_checkpoint_matrix.py --resume /absolute/path/to/checkpoint-matrix-ru
 Launcher kiểm job trùng theo cùng hai nguồn train trong snapshot. Worker khóa
 thư mục run và binding checkpoint/config; shard khác binding bị từ chối.
 Nếu failed, journal lỗi nhỏ được ghi thêm dưới `~/.qlrg_recovery/<run-name>/`.
+
+## Đã nộp ngày 23/11/2026
+
+- **Job 112448** — `qlrg-checkpoint-matrix`, trạng thái xác nhận sau submit:
+  `PENDING (Dependency)`, `afterok:81950(unfulfilled)`.
+- Snapshot bất biến: `/datastore/dungmt/textvqa/Tuan/qlrg-checkpoint-matrix-3ca5992`.
+- Run: `/datastore/dungmt/textvqa/Tuan/qlrg-checkpoint-matrix-3ca5992/runs/checkpoint-matrix-bzv8yp02`.
+- Logs: `logs/qlrg-checkpoint-matrix-112448.out` và `.err` trong run trên.
+- Slurm xác nhận partition `normal`, account `uit`, QoS `mig2-35`, GRES
+  `gpu:2g.35gb:1`, CPU 8, RAM 48 GB, time limit `2-00:00:00`.
+- **24 CPU tests đạt trên môi trường HPC**, gồm 5 test mới về matrix/provenance,
+  các test convergence/fusion/A2 và recovery. Các thông báo quota/stale-handle
+  trong test recovery là lỗi được mô phỏng có chủ đích, không phải lỗi quota thực.
+- CPU preflight xác nhận checksum matrix cũ/checkpoint 11305 và hai checkpoint
+  refit mới của 81949, đọc được tensor và khớp kiến trúc. Nguồn 81950 **chưa
+  hoàn tất**, nên preflight ghi `ready: false` và hai profile A2 còn pending.
+  Worker bắt buộc kiểm lại toàn bộ nguồn sau khi dependency được thỏa mãn;
+  chưa có xác nhận chạy inference của worker mới trên GPU tại lúc submit.
+
+```bash
+sacct -j 81950,112448 --format=JobID,JobName%25,State,ExitCode,Elapsed
+tail -F /datastore/dungmt/textvqa/Tuan/qlrg-checkpoint-matrix-3ca5992/runs/checkpoint-matrix-bzv8yp02/logs/qlrg-checkpoint-matrix-112448.out \
+        /datastore/dungmt/textvqa/Tuan/qlrg-checkpoint-matrix-3ca5992/runs/checkpoint-matrix-bzv8yp02/logs/qlrg-checkpoint-matrix-112448.err
+```
