@@ -77,3 +77,24 @@ UIT-HPC đều timeout. Lần chạy SSH verbose xác nhận public-key authenti
 thành công, nhưng server không phản hồi lúc mở session để chạy lệnh. Chưa
 chạy được bộ test HPC/preflight checkpoint cho snapshot mới này. Không sửa
 run/checkpoint cũ và không tạo job trùng khi kết nối chưa thành công.
+
+## Đã submit sau khi kết nối lại — 26/11/2026
+
+- **Job 163061**, tên `qlrg-mixed-crop`, nộp lúc 16:31:25 theo Slurm.
+  Trạng thái xác nhận ngay sau submit: `PENDING`, không dependency.
+- Snapshot code: `/datastore/dungmt/textvqa/Tuan/qlrg-mixed-checkpoints-3a10bfd`.
+- Run: `/datastore/dungmt/textvqa/Tuan/qlrg-mixed-checkpoints-3a10bfd/runs/checkpoint-matrix-mixed-sys_azme`.
+- **25 CPU tests đạt trong Python environment HPC**, gồm test tổ hợp old-full /
+  crop-trained và cặp so bật cả hai so với bật riêng full/crop.
+- Preflight nguồn hoàn tất ghi `ready: true`, không group nào còn pending;
+  checksum nguồn cũ và sáu record train mới đều đã kiểm tra. Các thông báo
+  quota/stale-handle trong bộ test recovery là lỗi mô phỏng, không phải quota
+  thực của run mới. Worker chưa được kiểm chứng inference GPU tại lúc submit.
+- Slurm xác nhận partition `normal`, account `uit`, QoS `mig2-35`, GPU
+  `2g.35gb:1`, 8 CPU / 48 GB RAM / time limit `1-00:00:00`.
+
+```bash
+sacct -j 163061 --format=JobID,JobName%25,State,ExitCode,Elapsed
+tail -F /datastore/dungmt/textvqa/Tuan/qlrg-mixed-checkpoints-3a10bfd/runs/checkpoint-matrix-mixed-sys_azme/logs/qlrg-mixed-crop-163061.out \
+        /datastore/dungmt/textvqa/Tuan/qlrg-mixed-checkpoints-3a10bfd/runs/checkpoint-matrix-mixed-sys_azme/logs/qlrg-mixed-crop-163061.err
+```
