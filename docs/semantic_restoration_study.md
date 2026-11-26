@@ -127,3 +127,27 @@ trong cùng run, không hạ lượng dữ liệu/epoch âm thầm. Job 163061 g
 python3 run_semantic_restoration.py --from-matrix /absolute/path/to/completed/crop_matrix
 python3 run_semantic_restoration.py --resume /absolute/path/to/semantic-restoration-run
 ```
+
+## Job đã nộp 26/11/2026
+
+- **163159 — qlrg-semantic-restoration**, submit 16:50:22 theo Slurm.
+  Trạng thái được xác nhận: **PENDING (AssocGrpJobsLimit)**, không dependency.
+  Job mixed 163061 vẫn RUNNING, không bị thay đổi/cancel.
+- Snapshot code: `/datastore/dungmt/textvqa/Tuan/qlrg-semantic-restoration-2c9239c`.
+- Run: `/datastore/dungmt/textvqa/Tuan/qlrg-semantic-restoration-2c9239c/runs/semantic-restoration-jioqkrbr`.
+- Slurm xác nhận normal / account uit / QoS mig2-35 / GPU 2g.35gb:1,
+  CPU8, RAM48GB, limit `3-00:00:00`, signal TERM trước hạn120 giây.
+- **31 CPU tests trên môi trường HPC đạt**. Preflight xác nhận model config,
+  split/hash dataset, đọc được tensor, kiến trúc S1b, checksum S1b/A2 và lượt
+  train source62258; `ready: true`. Source S1b SHA bắt đầu `e94d7394`, A2
+  `978e3182`. Lỗi quota/stale-handle xuất hiện trong test recovery là mô phỏng.
+- **Chưa xác nhận GPU forward/gradient của objective mới** tại lúc submit;
+  probe ba objective là phase đầu bắt buộc của job. Không gọi CPU tests là
+  bằng chứng model mới đã train được trên H200. Journal lỗi độc lập trong
+  `/home/dungmt/.qlrg_recovery/semantic-restoration-jioqkrbr/` nếu worker fail.
+
+```bash
+sacct -j 163061,163159 --format=JobID,JobName%28,State,ExitCode,Elapsed
+tail -F /datastore/dungmt/textvqa/Tuan/qlrg-semantic-restoration-2c9239c/runs/semantic-restoration-jioqkrbr/logs/qlrg-semantic-restoration-163159.out \
+        /datastore/dungmt/textvqa/Tuan/qlrg-semantic-restoration-2c9239c/runs/semantic-restoration-jioqkrbr/logs/qlrg-semantic-restoration-163159.err
+```
