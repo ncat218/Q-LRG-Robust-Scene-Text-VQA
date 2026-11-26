@@ -1,0 +1,23 @@
+{
+  "methods": ["continued", "answer_kd", "answer_kd_patch"],
+  "seed": 42,
+  "extra_epochs": 2,
+  "learning_rate": 0.00005,
+  "accumulate": 4,
+  "clean_fraction": 0.4,
+  "kd_weight": 0.5,
+  "kd_temperature": 2.0,
+  "contrast_weight": 0.1,
+  "contrast_temperature": 0.1,
+  "contrast_anchors": 128,
+  "equivalent_cosine": 0.98,
+  "checkpoint_writes_per_arm": 5,
+  "checkpoint_retention": ["latest.pt", "epoch1.pt"],
+  "blur_radius": 4.0,
+  "train_reader": "A0",
+  "initialization": "11305_S1b_weights_fresh_AdamW",
+  "primary_endpoint": "fixed_two_extra_epochs",
+  "early_stopping": false,
+  "official_val_for_selection": false,
+  "feature_disk_cache": false
+}
