@@ -20,6 +20,7 @@ def main():
     parser.add_argument('--a0-training', type=Path)
     parser.add_argument('--a2-training', type=Path)
     parser.add_argument('--dependency')
+    parser.add_argument('--profile-set', choices=('all', 'mixed'))
     parser.add_argument('--time', default='2-00:00:00')
     parser.add_argument('--preflight', action='store_true', help='Verify all completed sources on CPU, no submission')
     parser.add_argument('--dry-run', action='store_true')
@@ -31,6 +32,8 @@ def main():
         launch = json.loads((output / 'launch.json').read_text())
         if launch['study'] != 'checkpoint_matrix' or launch['repo'] != str(REPO):
             raise ValueError('Resume the same archived worker snapshot')
+        if args.profile_set and args.profile_set != launch.get('profile_set', 'all'):
+            raise ValueError('Resume cannot change the registered experiment profiles')
     else:
         if not args.a0_training or not args.a2_training:
             parser.error('Both training run directories are required')
@@ -46,11 +49,13 @@ def main():
             output = REPO / 'runs/dry-run-checkpoint-matrix'
         else:
             (REPO / 'runs').mkdir(exist_ok=True)
-            output = Path(tempfile.mkdtemp(prefix='checkpoint-matrix-', dir=REPO / 'runs'))
+            prefix = 'checkpoint-matrix-mixed-' if args.profile_set == 'mixed' else 'checkpoint-matrix-'
+            output = Path(tempfile.mkdtemp(prefix=prefix, dir=REPO / 'runs'))
         launch = {**settings, 'repo': str(REPO), 'study': 'checkpoint_matrix', 'split': 'official_val',
                   'source_matrix': str(source), 'a0_training': str(args.a0_training.resolve()),
                   'a2_training': str(args.a2_training.resolve()), 'smoke_images': None,
-                  'flops_images': 3, 'conditions': ['CLEAN', 'LR4'], 'dependency_requested': args.dependency}
+                  'flops_images': 3, 'conditions': ['CLEAN', 'LR4'], 'dependency_requested': args.dependency,
+                  'profile_set': args.profile_set or 'all'}
         if not args.dry_run:
             (output / 'launch.json').write_text(json.dumps(launch, indent=2) + '\n', encoding='utf-8')
     if args.preflight:
@@ -79,7 +84,8 @@ def main():
         for candidate in candidates:
             saved = json.loads((candidate / 'launch.json').read_text())
             jobfile = candidate / 'job-id.txt'
-            if (saved.get('a0_training'), saved.get('a2_training')) == (launch['a0_training'], launch['a2_training']):
+            if (saved.get('a0_training'), saved.get('a2_training'), saved.get('profile_set', 'all')) == (
+                    launch['a0_training'], launch['a2_training'], launch.get('profile_set', 'all')):
                 if jobfile.exists() and jobfile.read_text().strip().split(';')[0] in active:
                     raise RuntimeError('A matching evaluation is already active: ' + str(candidate))
     resources = json.loads((REPO / 'configs/slurm_hpc.json').read_text())
@@ -94,7 +100,8 @@ def main():
         script = write_script(output, 'checkpoint-matrix', commands)
     else:
         script = output / 'checkpoint-matrix.sbatch'
-    command = ['sbatch', '--parsable', f'--chdir={REPO}', '--job-name=qlrg-checkpoint-matrix',
+    job_name = 'qlrg-mixed-crop' if launch.get('profile_set') == 'mixed' else 'qlrg-checkpoint-matrix'
+    command = ['sbatch', '--parsable', f'--chdir={REPO}', f'--job-name={job_name}',
                f"--account={resources['account']}", f"--partition={resources['partition']}",
                f"--qos={resources['qos']}", f"--gres={resources['gres']}",
                '--cpus-per-task=8', '--mem=48G', f'--time={args.time}',

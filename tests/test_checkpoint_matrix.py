@@ -8,11 +8,36 @@ import torch
 
 from qlrg.common import object_hash, read_json, sha256, write_json
 from qlrg.s1_model import VisualResidual
-from scripts.checkpoint_matrix import report, validate_state
+from scripts.checkpoint_matrix import profiles_for, report, validate_state
 from scripts.checkpoint_matrix_plan import comparison_pairs, module_plan, resolve_training, specifications
 
 
 class CheckpointMatrixTests(unittest.TestCase):
+    def test_mixed_plan_really_combines_old_full_with_new_crop_and_has_matched_controls(self):
+        records = {key: {'baseline_kept': False} for key in ('new_A0_crop', 'new_A2_restoration_crop')}
+        profiles = profiles_for(records, 'mixed')
+        specs, table = specifications(profiles)
+        self.assertEqual((len(specs), len(table)), (72, 120))
+        self.assertEqual({s['layout'] for s in specs}, {'full', 'fusion'})
+        index = {(r['profile'], r['reader'], r['condition'], r['budget'], r['layout'], r['flags']): r['arm']
+                 for r in table}
+        pairs = set(comparison_pairs(table))
+        for reader in ('A0', 'A2'):
+            for condition in ('CLEAN', 'LR4'):
+                for budget in ('fair576', 'native'):
+                    key = ('mixed_old_full_A0_crop', reader, condition, budget, 'fusion')
+                    both = index[(*key, '11')]
+                    actual = next(s for s in specs if s['arm'] == both)
+                    self.assertEqual(actual['modules'], ['old11305', 'new_A0_crop'])
+                    self.assertIn((index[(*key, '10')], both), pairs)
+                    self.assertIn((index[(*key, '01')], both), pairs)
+                    self.assertIn((index[('old11305', reader, condition, budget, 'fusion', '11')], both), pairs)
+        for left, right in pairs:
+            self.assertEqual(left.split('__')[1:3], right.split('__')[1:3])
+        records['new_A2_restoration_crop']['baseline_kept'] = True
+        with self.assertRaisesRegex(ValueError, 'actually trained'):
+            profiles_for(records, 'mixed')
+
     def test_aliases_and_comparisons_keep_condition_budget_and_reader_intent(self):
         profiles = {
             'old11305': {'full': 'old', 'crop': 'old', 'readers': ['A0', 'A2']},

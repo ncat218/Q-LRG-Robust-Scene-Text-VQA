@@ -107,7 +107,7 @@ def specifications(profiles):
         for reader in settings['readers']:
             for condition in ('CLEAN', 'LR4'):
                 for budget in ('fair576', 'native'):
-                    for layout in ('full', 'crop', 'fusion'):
+                    for layout in settings.get('layouts', ('full', 'crop', 'fusion')):
                         views = ('full', 'crop') if layout == 'fusion' else (layout,)
                         toggles = ((0, 0), (1, 0), (0, 1), (1, 1)) if layout == 'fusion' else ((0,), (1,))
                         for flags in toggles:
@@ -132,6 +132,12 @@ def comparison_pairs(table):
                 ('old11305', r, c, b, layout, flags)]
         if p == 'new_A2_restoration':
             keys += [('new_A0', r, c, b, layout, flags), ('new_A2_ce_only', r, c, b, layout, flags)]
+        if layout == 'fusion' and flags == '11':
+            # Isolate adding crop restoration when full restoration is already on,
+            # and vice versa; both-on versus both-off is not sufficient.
+            keys += [(p, r, c, b, layout, '10'), (p, r, c, b, layout, '01')]
+        if p == 'mixed_old_full_A2_crop':
+            keys += [('mixed_old_full_A0_crop', r, c, b, layout, flags)]
         if r == 'A2':
             keys += [(p, 'A0', c, b, layout, flags)]
         for key in keys:

@@ -94,8 +94,20 @@ def preflight(output, allow_pending=False):
             'pending_training_groups': pending, 'ready': not pending}
 
 
-def profiles_for(records):
+def profiles_for(records, profile_set='all'):
     profiles = {'old11305': {'full': 'old11305', 'crop': 'old11305', 'readers': ['A0', 'A2']}}
+    if profile_set == 'mixed':
+        for label, crop_source, readers in [
+                ('mixed_old_full_A0_crop', 'new_A0_crop', ['A0', 'A2']),
+                ('mixed_old_full_A2_crop', 'new_A2_restoration_crop', ['A2'])]:
+            if records[crop_source]['baseline_kept']:
+                raise ValueError('Mixed benchmark requires an actually trained crop checkpoint')
+            profiles[label] = {'full': 'old11305', 'crop': crop_source, 'readers': readers}
+        for profile in profiles.values():
+            profile['layouts'] = ['full', 'fusion']
+        return profiles
+    if profile_set != 'all':
+        raise ValueError('Unknown matrix profile set')
     for label in ('new_A0', 'new_A2_restoration', 'new_A2_ce_only'):
         profiles[label] = {v: None if records[label + '_' + v]['baseline_kept'] else label + '_' + v
                            for v in ('full', 'crop')}
@@ -286,7 +298,7 @@ def run(output):
             if source.get('reader') == 'A2' and source['a2']['sha256'] != old['A2']['provenance']['sha256']:
                 raise ValueError('A2-conditioned training used another reader')
         proposals, selector = load_boxes(Path(launch['selector_benchmark']), binding['manifest_hash'], old['A2']['provenance'])
-        profiles = profiles_for(records)
+        profiles = profiles_for(records, launch.get('profile_set', 'all'))
         specs, table = specifications(profiles)
         binding.update(profiles=profiles, training_checkpoints=records, arms=specs, table=table,
                        selector_binding=object_hash(selector), source_matrix_binding=object_hash(archived),
@@ -301,7 +313,10 @@ def run(output):
         lora.load_state_dict(old['A2']['state'], strict=True)
         adapters = {'old11305': make_adapter(model, 'S1b', old['S1b']['config']).eval().requires_grad_(False)}
         adapters['old11305'].load_state_dict(old['S1b']['state'], strict=True)
+        required_modules = {m for spec in specs for m in spec['modules'] if m is not None}
         for name, record in records.items():
+            if name not in required_modules:
+                continue
             state = validate_state(record)
             if state is not None:
                 adapter = make_adapter(model, 'S1b', record['training_binding']['base_config']).eval().requires_grad_(False)
