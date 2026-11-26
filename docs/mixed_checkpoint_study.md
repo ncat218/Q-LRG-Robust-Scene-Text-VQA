@@ -68,3 +68,12 @@ Nguồn train đều đã hoàn tất nên không cần dependency. Một MIG H2
 8 CPU / 48 GB RAM, time limit 24 giờ. Ước lượng thô khoảng 12–16 giờ từ job
 112448, không phải cam kết thời gian. CPU unit test kiểm riêng tổ hợp module
 old-full/new-crop và các cặp CI cần thiết trước khi submit.
+
+## Trạng thái chuẩn bị ngày 26/11/2026
+
+Code commit `3a10bfd` đã push `crop-branch`; 6 CPU unit tests về matrix đạt
+trên máy phát triển. **Chưa submit Slurm, chưa có Job ID.** Ba lần kết nối
+UIT-HPC đều timeout. Lần chạy SSH verbose xác nhận public-key authentication
+thành công, nhưng server không phản hồi lúc mở session để chạy lệnh. Chưa
+chạy được bộ test HPC/preflight checkpoint cho snapshot mới này. Không sửa
+run/checkpoint cũ và không tạo job trùng khi kết nối chưa thành công.
